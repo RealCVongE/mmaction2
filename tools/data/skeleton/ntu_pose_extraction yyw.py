@@ -291,7 +291,7 @@ def parse_args():
     parser.add_argument('video', type=str, help='source video')
     parser.add_argument('output', type=str, help='output pickle name')
     parser.add_argument('--device', type=str, default='cuda:0')
-    parser.add_argument('--skip-postproc', action='store_true')
+    # parser.add_argument('--skip-postproc', action='store_true')
     args = parser.parse_args()
     return args
 
@@ -301,6 +301,6 @@ if __name__ == '__main__':
     args.device = global_args.device
     args.video = global_args.video
     args.output = global_args.output
-    args.skip_postproc = global_args.skip_postproc
-    anno = ntu_pose_extraction(args.video, args.skip_postproc)
+    # args.skip_postproc = global_args.skip_postproc
+    anno = ntu_pose_extraction(args.video, True)
     mmengine.dump(anno, args.output)
