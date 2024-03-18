@@ -149,9 +149,9 @@ mmaction/tools/*
 mmaction/.mim
 
 # dataset
-!Sample_anomaly/**
-!Sample_buying/**
-!softlink_retail/**
 *.xml
 *.mp4
 *.json
+Sample_anomaly/
+Sample_buying/
+softlink_retail
