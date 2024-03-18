@@ -149,7 +149,7 @@ mmaction/tools/*
 mmaction/.mim
 
 # dataset
-!/Sample_anomaly/*
-!/Sample_buying/*
-!/softlink_retail/*
+Sample_anomaly/
+Sample_buying/
+softlink_retail
 *.mp4
