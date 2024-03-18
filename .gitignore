@@ -152,3 +152,6 @@ mmaction/.mim
 !Sample_anomaly/**
 !Sample_buying/**
 !softlink_retail/**
+*.xml
+*.mp4
+*.json
