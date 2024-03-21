@@ -114,7 +114,7 @@ venv.bak/
 
 # custom
 /data
-.vscode
+# .vscode
 .idea
 *.pkl
 *.pkl.json
