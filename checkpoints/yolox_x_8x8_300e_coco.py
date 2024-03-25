@@ -151,6 +151,16 @@ param_scheduler = [
 ]
 resume = False
 test_cfg = dict(type='TestLoop')
+file_client_args = dict(backend='disk')
+
+test_pipeline = [
+    dict(type='LoadImageFromFile', file_client_args=file_client_args),
+    dict(type='mmdet.Resize', scale=(1333, 800), keep_ratio=True),
+    dict(
+        type='mmdet.PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
+                   'scale_factor'))
+]
 test_dataloader = dict(
     batch_size=8,
     dataset=dict(
@@ -158,31 +168,7 @@ test_dataloader = dict(
         backend_args=None,
         data_prefix=dict(img='val2017/'),
         data_root='data/coco/',
-        pipeline=[
-            dict(backend_args=None, type='LoadImageFromFile'),
-            dict(keep_ratio=True, scale=(
-                640,
-                640,
-            ), type='Resize'),
-            dict(
-                pad_to_square=True,
-                pad_val=dict(img=(
-                    114.0,
-                    114.0,
-                    114.0,
-                )),
-                type='Pad'),
-            dict(type='LoadAnnotations', with_bbox=True),
-            dict(
-                meta_keys=(
-                    'img_id',
-                    'img_path',
-                    'ori_shape',
-                    'img_shape',
-                    'scale_factor',
-                ),
-                type='PackDetInputs'),
-        ],
+        pipeline=test_pipeline,
         test_mode=True,
         type='CocoDataset'),
     drop_last=False,
@@ -194,31 +180,8 @@ test_evaluator = dict(
     backend_args=None,
     metric='bbox',
     type='CocoMetric')
-test_pipeline = [
-    dict(backend_args=None, type='LoadImageFromFile'),
-    dict(keep_ratio=True, scale=(
-        640,
-        640,
-    ), type='Resize'),
-    dict(
-        pad_to_square=True,
-        pad_val=dict(img=(
-            114.0,
-            114.0,
-            114.0,
-        )),
-        type='Pad'),
-    dict(type='LoadAnnotations', with_bbox=True),
-    dict(
-        meta_keys=(
-            'img_id',
-            'img_path',
-            'ori_shape',
-            'img_shape',
-            'scale_factor',
-        ),
-        type='PackDetInputs'),
-]
+file_client_args = dict(backend='disk')
+
 train_cfg = dict(max_epochs=300, type='EpochBasedTrainLoop', val_interval=10)
 train_dataloader = dict(
     batch_size=8,
@@ -281,7 +244,7 @@ train_dataloader = dict(
                     1,
                 ),
                 type='FilterAnnotations'),
-            dict(type='PackDetInputs'),
+            dict(type='mmdet.PackDetInputs'),
         ],
         type='MultiImageMixDataset'),
     num_workers=4,
@@ -346,7 +309,7 @@ train_dataset = dict(
                 1,
             ),
             type='FilterAnnotations'),
-        dict(type='PackDetInputs'),
+        dict(type='mmdet.PackDetInputs'),
     ],
     type='MultiImageMixDataset')
 train_pipeline = [
@@ -393,7 +356,7 @@ train_pipeline = [
         1,
         1,
     ), type='FilterAnnotations'),
-    dict(type='PackDetInputs'),
+    dict(type='mmdet.PackDetInputs'),
 ]
 tta_model = dict(
     tta_cfg=dict(max_per_img=100, nms=dict(iou_threshold=0.65, type='nms')),
@@ -444,7 +407,7 @@ tta_pipeline = [
                         'flip',
                         'flip_direction',
                     ),
-                    type='PackDetInputs'),
+                    type='mmdet.PackDetInputs'),
             ],
         ],
         type='TestTimeAug'),
@@ -480,7 +443,7 @@ val_dataloader = dict(
                     'img_shape',
                     'scale_factor',
                 ),
-                type='PackDetInputs'),
+                type='mmdet.PackDetInputs'),
         ],
         test_mode=True,
         type='CocoDataset'),

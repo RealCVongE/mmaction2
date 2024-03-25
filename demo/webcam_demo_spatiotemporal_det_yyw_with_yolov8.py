@@ -3,11 +3,13 @@
 
 Some codes are based on https://github.com/facebookresearch/SlowFast
 """
+from collections import defaultdict
 from mmengine.utils import track_iter_progress
 from mmdet.structures import DetDataSample
 from mmpose.structures import PoseDataSample, merge_data_samples
 from typing import List, Optional, Tuple, Union
 import mmengine
+from ultralytics import YOLO
 from mmaction.apis import (detection_inference, inference_recognizer,
                            inference_skeleton, init_recognizer, pose_inference)
 import argparse
@@ -45,6 +47,8 @@ FONTCOLOR = (255, 255, 255)  # BGR, white
 MSGCOLOR = (128, 128, 128)  # BGR, gray
 THICKNESS = 1
 LINETYPE = 1
+NUM_FRAME=30
+PREDICT_STEP=8
 def hex2color(h):
     """Convert the 6-digit hex string to tuple of 3 int value (RGB)"""
     return (int(h[:2], 16), int(h[2:4], 16), int(h[4:], 16))
@@ -296,14 +300,17 @@ class TaskInfo:
         # different bboxes and the intter brackets indicate different action
         # results for the same bbox. tuple contains `class_name` and `score`.
         self.action_preds = None  # stdet results
-
+        self.stdet_results=None
         # human bboxes with the format (xmin, ymin, xmax, ymax)
         self.display_bboxes = None  # bboxes coords for self.frames
         self.stdet_bboxes = None  # bboxes coords for self.processed_frames
         self.stdet_poses = None  # bboxes coords for self.processed_frames
         self.stdet_poses_data_samples = None  # bboxes coords for self.processed_frames
         self.ratio = None  # processed_frames.shape[1::-1]/frames.shape[1::-1]
-
+        self.track_history = None
+        self.frame_buffer = None
+        self.keypoint_score = None
+        self.boxes = None
         # for each clip, draw predictions on clip_vis_length frames
         self.clip_vis_length = -1
         self.timestamps = None
@@ -320,7 +327,10 @@ class TaskInfo:
         self.processed_frames = processed_frames
         self.id = idx
         self.img_shape = processed_frames[0].shape[:2]
-
+    def add_item(self,track_history,frame_buffer ,boxes):
+        self.track_history = track_history
+        self.frame_buffer = frame_buffer
+        self.boxes = boxes
     def add_bboxes(self, display_bboxes):
         """Add correspondding bounding boxes."""
         self.display_bboxes = display_bboxes
@@ -357,163 +367,6 @@ class TaskInfo:
             inputs=input_tensor, data_samples=[datasample], mode='predict')
 
 
-class BaseHumanDetector(metaclass=ABCMeta):
-    """Base class for Human Dector.
-
-    Args:
-        device (str): CPU/CUDA device option.
-    """
-
-    def __init__(self, device):
-        self.device = torch.device(device)
-
-    @abstractmethod
-    def _do_detect(self, frames):
-        """Get human bboxes with shape [n, 4].
-
-        The format of bboxes is (xmin, ymin, xmax, ymax) in pixels.
-        """
-
-    def predict(self, task):
-        """Add keyframe bboxes to task."""
-        # keyframe idx == (clip_len * frame_interval) // 2
-        # keyframe = task.frames[len(task.frames) // 2]
-
-        # call detector
-        bboxes,_ = self._do_detect(task.frames)
-
-        # # convert bboxes to torch.Tensor and move to target device
-        # if isinstance(bboxes, np.ndarray):
-        #     bboxes = torch.from_numpy(bboxes).to(self.device)
-        # elif isinstance(bboxes, torch.Tensor) and bboxes.device != self.device:
-        #     bboxes = bboxes.to(self.device)
-
-        # update task
-        task.add_bboxes(bboxes)
-
-        return task
-
-class BasePoseEstimator(metaclass=ABCMeta):
-    """Base class for Human Dector.
-
-    Args:
-        device (str): CPU/CUDA device option.
-    """
-
-    def __init__(self, device):
-        self.device = torch.device(device)
-
-    @abstractmethod
-    def _do_detect(self, frames, stdet_bboxes):
-        """Get human bboxes with shape [n, 4].
-
-        The format of bboxes is (xmin, ymin, xmax, ymax) in pixels.
-        """
-
-    def predict(self, task):
-        """Add keyframe bboxes to task."""
-        # keyframe idx == (clip_len * frame_interval) // 2
-        keyframe = task.frames[len(task.frames) // 2]
-
-        # call detector
-        pose_results, pose_datasample  = self._do_detect(task.frames,task.stdet_bboxes)
-
-        # convert bboxes to torch.Tensor and move to target device
-        # if isinstance(bboxes, np.ndarray):
-        #     bboxes = torch.from_numpy(bboxes).to(self.device)
-        # elif isinstance(bboxes, torch.Tensor) and bboxes.device != self.device:
-        #     bboxes = bboxes.to(self.device)
-
-        # update task
-        task.add_poses(pose_results, pose_datasample)
-
-        return task
-
-class MmdetHumanDetector(BaseHumanDetector):
-    """Wrapper for mmdetection human detector.
-
-    Args:
-        config (str): Path to mmdetection config.
-        ckpt (str): Path to mmdetection checkpoint.
-        device (str): CPU/CUDA device option.
-        score_thr (float): The threshold of human detection score.
-        person_classid (int): Choose class from detection results.
-            Default: 0. Suitable for COCO pretrained models.
-    """
-
-    def __init__(self, config, ckpt, device, score_thr, person_classid=0):
-        super().__init__(device)
-        if isinstance(config, nn.Module):
-            self.model = config
-        else:
-            self.model = init_detector(config, ckpt, device=device)
-
-        self.person_classid = person_classid
-        self.score_thr = score_thr
-    def _do_detect(self, frames):
-        """Get bboxes in shape [n, 4] and values in pixels."""
-        results = []
-        data_samples = []
-        for frame in track_iter_progress(frames):
-        
-            det_data_sample: DetDataSample  = inference_detector(self.model, frame)
-            pred_instance = det_data_sample.pred_instances.cpu().numpy()
-            bboxes = pred_instance.bboxes
-            scores = pred_instance.scores
- 
-        
-            valid_idx = np.logical_and(pred_instance.labels == self.person_classid,
-                                        pred_instance.scores >  self.score_thr)
-            bboxes = bboxes[valid_idx]
-            scores = scores[valid_idx]
-            results.append(bboxes)
-            data_samples.append(det_data_sample)
-        return results ,data_samples
- 
-class MmdetPoseEstimator(BasePoseEstimator):
-    """Wrapper for mmdetection human detector.
-
-    Args:
-        config (str): Path to mmdetection config.
-        ckpt (str): Path to mmdetection checkpoint.
-        device (str): CPU/CUDA device option.
-        score_thr (float): The threshold of human detection score.
-        person_classid (int): Choose class from detection results.
-            Default: 0. Suitable for COCO pretrained models.
-    """
-
-    def __init__(self, config, ckpt, device, score_thr, person_classid=0):
-        super().__init__(device)
-        self.model = init_model(config, ckpt, device=device)
-        self.person_classid = person_classid
-        self.score_thr = score_thr
-
-    def _do_detect(self, frames, det_results):
-        """Get bboxes in shape [n, 4] and values in pixels."""
-        
-        results = []
-        data_samples = []
-        for f, d in track_iter_progress(list(zip(frames, det_results))):
-            pose_data_samples: List[PoseDataSample] \
-                = inference_topdown(self.model, f, d[..., :4], bbox_format='xyxy')
-            pose_data_sample = merge_data_samples(pose_data_samples)
-            pose_data_sample.dataset_meta = self.model.dataset_meta
-            # make fake pred_instances
-            if not hasattr(pose_data_sample, 'pred_instances'):
-                num_keypoints = self.model.dataset_meta['num_keypoints']
-                pred_instances_data = dict(
-                    keypoints=np.empty(shape=(0, num_keypoints, 2)),
-                    keypoints_scores=np.empty(shape=(0, 17), dtype=np.float32),
-                    bboxes=np.empty(shape=(0, 4), dtype=np.float32),
-                    bbox_scores=np.empty(shape=(0), dtype=np.float32))
-                pose_data_sample.pred_instances = InstanceData(
-                    **pred_instances_data)
-
-            poses = pose_data_sample.pred_instances.to_dict()
-            results.append(poses)
-            data_samples.append(pose_data_sample)
-
-        return results, data_samples
 class StdetPredictor:
     """Wrapper for MMAction2 spatio-temporal action models.
 
@@ -543,104 +396,84 @@ class StdetPredictor:
         self.config.model.cls_head.num_classes = self.num_class
         self.model = init_recognizer(config, checkpoint, device=device)
         self.predict_stepsize = predict_stepsize
-        self.h, self.w = clip_helper.h, clip_helper.w
-        self.new_h, self.new_w = clip_helper.new_h, clip_helper.new_w
+        self.cliper = clip_helper
         # self.new_w, self.new_h = mmcv.rescale_size((self.w, self.h), (256, np.Inf))
         self.clip_len, self.frame_interval = 30, 1
-    def skeleton_based_stdet(self, label_map, human_detections, pose_results, num_frame ):
+    def skeleton_based_stdet(self, label_map, task:TaskInfo):
+        self.clip_len= len(task.boxes)
         window_size = self.clip_len * self.frame_interval
-        assert self.clip_len % 2 == 0, 'We would like to have an even self.clip_len'
-        timestamps = np.arange(window_size // 2, num_frame + 1 - window_size // 2,
-                            self.predict_stepsize)
+        timestamps = np.arange(window_size // 2, NUM_FRAME + 1 - window_size // 2,PREDICT_STEP )
         skeleton_predictions = []
-        
-        print('Performing SpatioTemporal Action Detection for each clip')
-        prog_bar = mmengine.ProgressBar(len(timestamps))
         for timestamp in timestamps:
-            proposal = human_detections[timestamp - 1]
-            if proposal.shape[0] == 0:  # no people detected
-                skeleton_predictions.append(None)
-                continue
-
             start_frame = timestamp - (self.clip_len // 2 - 1) * self.frame_interval
             frame_inds = start_frame + np.arange(0, window_size, self.frame_interval)
             frame_inds = list(frame_inds - 1)
             num_frame = len(frame_inds)  # 30
+            new_track_history = defaultdict(task.track_history.default_factory)
+            for key in task.track_history.keys():
+                if not len(task.track_history[key])>len(frame_inds):
+                    continue
+                new_track_history[key] = [task.track_history[key][ind] for ind in frame_inds]
 
-            pose_result = [pose_results[ind] for ind in frame_inds]
+            skeleton_prediction = defaultdict(lambda:[])
+            for track_id, item in new_track_history.items():
+                for  k in item:
+                    (keypoints,boxes) =k
+                    fake_anno = dict(
+                        frame_dict='',
+                        label=-1,
+                        img_shape=(self.cliper.h, self.cliper.w),
+                        origin_shape=(self.cliper.h, self.cliper.w),
+                        start_index=0,
+                        modality='Pose',
+                        total_frames=len(task.frame_buffer))
+                    num_person = 1
 
-            skeleton_prediction = []
-            for i in range(proposal.shape[0]):  # num_person
-                skeleton_prediction.append([])
+                    num_keypoint = 17
+                    keypoint = np.zeros(
+                        (num_person, NUM_FRAME, num_keypoint, 2))  # M T V 2
+                    keypoint_score = np.zeros(
+                        (num_person, NUM_FRAME, num_keypoint)) 
+                    for  j, pose in enumerate(keypoints):
+                        keypoint_temp= np.squeeze( pose.xy.cpu().numpy())
+                        keypoint_score_temp=np.squeeze( pose.conf.cpu().numpy())
+                        keypoint[0, j] = keypoint_temp
+                        keypoint_score[0, j] = keypoint_score_temp
+                    fake_anno['keypoint'] = keypoint
+                    fake_anno['keypoint_score'] = keypoint_score
 
-                fake_anno = dict(
-                    frame_dict='',
-                    label=-1,
-                    img_shape=(self.h, self.w),
-                    origin_shape=(self.h, self.w),
-                    start_index=0,
-                    modality='Pose',
-                    total_frames=num_frame)
-                num_person = 1
-
-                num_keypoint = 17
-                keypoint = np.zeros(
-                    (num_person, num_frame, num_keypoint, 2))  # M T V 2
-                keypoint_score = np.zeros(
-                    (num_person, num_frame, num_keypoint))  # M T V
-
-                # pose matching
-                person_bbox = proposal[i][:4]
-                area = expand_bbox(person_bbox, self.h, self.w)
-
-                for j, poses in enumerate(pose_result):  # num_frame
-                    max_iou = float('-inf')
-                    index = -1
-                    if len(poses['keypoints']) == 0:
-                        continue
-                    for k, bbox in enumerate(poses['bboxes']):
-                        iou = cal_iou(bbox, area)
-                        if max_iou < iou:
-                            index = k
-                            max_iou = iou
-                    keypoint[0, j] = poses['keypoints'][index]
-                    keypoint_score[0, j] = poses['keypoint_scores'][index]
-
-
-                fake_anno['keypoint'] = keypoint
-                fake_anno['keypoint_score'] = keypoint_score
-                print(type(keypoint))
-                print(type(keypoint_score))
-                output = inference_recognizer(self.model, fake_anno)
-                # for multi-label recognition
-                score = output.pred_score.tolist()
-                for k in range(len(score)):  # 81
-                    if k not in label_map:
-                        continue
-                    if score[k] > self.action_score_thr:
-                        skeleton_prediction[i].append((label_map[k], score[k]))
-
+                    output = inference_recognizer(self.model, fake_anno)
+                    # for multi-label recognition
+                    score = output.pred_score.tolist()
+                    score.sort(key=lambda x: -x)
+                    # count=0
+                    for k in range(len(score)):  # 81
+                        if k not in label_map:
+                            continue
+                        # if count>4:
+                            # break
+                        skeleton_prediction[track_id].append((boxes,label_map[k], score[k]))
+                        break
+                        # count+=1
             skeleton_predictions.append(skeleton_prediction)
-            prog_bar.update()
-
-        return timestamps, skeleton_predictions
+        return  timestamps, skeleton_predictions
     def predict(self, task):
         """Spatio-temporval Action Detection model inference."""
         # No need to do inference if no one in keyframe
-        if len(task.stdet_bboxes) == 0:
+        if len(task.boxes) == 0:
             return task
 
         timestamps, stdet_preds = self.skeleton_based_stdet( self.stdet_label_map,
-                                                       task.stdet_bboxes,
-                                                       task.stdet_poses, len(task.frames))
-        stdet_results = []
-        for timestamp, prediction in zip(timestamps, stdet_preds):
-            human_detection = task.stdet_bboxes[timestamp - 1]
-            stdet_results.append(
-                pack_result(human_detection, prediction, self.new_h, self.new_w))        
+                                                       task)
+        # stdet_results = []
+        # for timestamp in timestamps:
+        #     human_detection = task["boxes"][timestamp - 1]
+        #     stdet_results.append(
+        #         pack_result(human_detection, prediction, self.cliper.new_h, self.cliper.new_w))        
 
 
-        task.add_action_preds(timestamps,stdet_results)
+        task.timestamps=timestamps
+        task.stdet_results=stdet_preds
 
         return task
 
@@ -656,15 +489,19 @@ class ClipHelper:
                  predict_stepsize=40,
                  output_fps=25,
                  clip_vis_length=8,
-                 out_filename=None,
+                 out_filename="output.mp4",
                  show=True,
                  stdet_input_shortside=256):
         # stdet sampling strategy
         val_pipeline = config.val_pipeline
-
+        self.stdet_input_shortside = stdet_input_shortside
         clip_len, frame_interval = 30,1
         self.window_size = clip_len * frame_interval
-
+        self.output_fps = output_fps
+        self.show = show
+        self.video_writer = None
+        if out_filename is not None:
+            self.video_writer = self.get_output_video_writer(out_filename)
         # asserts
         assert (out_filename or show), \
             'out_filename and show cannot both be None'
@@ -672,25 +509,36 @@ class ClipHelper:
         assert clip_vis_length <= predict_stepsize
         assert 0 < predict_stepsize <= self.window_size
 
-        # source params
-        try:
-            self.cap = cv2.VideoCapture(int(input_video))
-            self.webcam = True
-        except ValueError:
-            self.cap = cv2.VideoCapture(input_video)
-            self.webcam = False
-        assert self.cap.isOpened()
+        self.model2 = YOLO('checkpoints/yolov8x-pose-p6.pt')  # Load an official Pose model
+        self.display_height=display_height
+        self.display_width=display_width
 
-        # stdet input preprocessing params
-        h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.results2 = self.model2.track(source="rtsp://dudnjs:aiffelmodu@192.168.219.102:554/stream1" ,stream=True,show=False,persist=True)
+        # start_time = time.time()
+        self.h, self.w = next(self.results2).orig_shape
         self.stdet_input_size = mmcv.rescale_size(
-            (w, h), (stdet_input_shortside, np.Inf))
-        self.h = h
-        self.w = w
-        self.new_w, self.new_h = mmcv.rescale_size((w, h), (256, np.Inf))
+        (self.w, self.h), (self.stdet_input_shortside, np.Inf))
 
-        # task init params
+        self.new_w, self.new_h = mmcv.rescale_size((self.w, self.h), (256, np.Inf))
+        self.predict_stepsize = predict_stepsize
+    
+        # output/display params
+        if self.display_height > 0 and self.display_width > 0:
+            self.display_size = (self.display_width, self.display_height)
+        elif self.display_height > 0 or self.display_width > 0:
+            self.display_size = mmcv.rescale_size(
+                (self.w, self.h), (np.Inf, max(self.display_height, self.display_width)))
+        else:
+            self.display_size = (self.w, self.h)
+        self.ratio = tuple(
+            n / o for n, o in zip(self.stdet_input_size, self.display_size))
+
+
+        display_start_idx = self.window_size // 2 - self.predict_stepsize // 2
+        self.display_inds = [
+            display_start_idx + i for i in range(self.predict_stepsize)
+        ]
+
         self.clip_vis_length = clip_vis_length
         self.predict_stepsize = predict_stepsize
         self.buffer_size = self.window_size - self.predict_stepsize
@@ -701,48 +549,30 @@ class ClipHelper:
         self.buffer = []
         self.processed_buffer = []
 
-        # output/display params
-        if display_height > 0 and display_width > 0:
-            self.display_size = (display_width, display_height)
-        elif display_height > 0 or display_width > 0:
-            self.display_size = mmcv.rescale_size(
-                (w, h), (np.Inf, max(display_height, display_width)))
-        else:
-            self.display_size = (w, h)
-        self.ratio = tuple(
-            n / o for n, o in zip(self.stdet_input_size, self.display_size))
-        if output_fps <= 0:
-            self.output_fps = int(self.cap.get(cv2.CAP_PROP_FPS))
-        else:
-            self.output_fps = output_fps
-        self.show = show
-        self.video_writer = None
-        if out_filename is not None:
-            self.video_writer = self.get_output_video_writer(out_filename)
-        display_start_idx = self.window_size // 2 - self.predict_stepsize // 2
-        self.display_inds = [
-            display_start_idx + i for i in range(self.predict_stepsize)
-        ]
-
         # display multi-theading params
-        self.display_id = -1  # task.id for display queue
-        self.display_queue = {}
-        self.display_lock = threading.Lock()
-        self.output_lock = threading.Lock()
+        self.display_id = -1  # task["id"] for display queue
+        self.display_queue = queue.Queue()
+        # self.display_lock = threading.Lock()
+        # self.output_lock = threading.Lock()
 
         # read multi-theading params
-        self.read_id = -1  # task.id for read queue
-        self.read_id_lock = threading.Lock()
+        self.read_id = -1  # task["id"] for read queue
+        # self.read_id_lock = threading.Lock()
         self.read_queue = queue.Queue()
-        self.read_lock = threading.Lock()
+        # self.read_lock = threading.Lock()
         self.not_end = True  # cap.read() flag
 
         # program state
         self.stopped = False
-
+        
         atexit.register(self.clean)
-
-    def read_fn(self):
+        self.frame_buffer = []
+        self.poses = []
+        self.track_history = None
+        self.keypoint_score = []
+        self.boxes = []
+         
+    def read_fn(self,read_queue):
         """Main function for read thread.
 
         Contains three steps:
@@ -753,112 +583,91 @@ class ClipHelper:
         """
         was_read = True
         start_time = time.time()
-        while was_read and not self.stopped:
-            # init task
+        poses=[]
+        boxes=[]
+        frame_buffer=[]
+        for r in self.results2:
+            track_history = defaultdict(lambda: [])
+
+            # get data from read queue
+            # inference_start = time.time()
+            keypoints2 = r.keypoints.xy.cpu()
+            res_plotted = r.plot()
+            frame_buffer.append(res_plotted)
+            boxes2 = r.boxes.xywh.cpu()
             task = TaskInfo()
-            task.clip_vis_length = self.clip_vis_length
-            task.frames_inds = self.frames_inds
-            task.ratio = self.ratio
+            
+            # self.keypoint.append(keypoints.xy.cpu().numpy())
+            poses.append(r.keypoints)
+                        # update read state
+            track_ids=None
+            if r.boxes.id!=None:
+                track_ids = r.boxes.id.int().cpu().tolist()
+                for box,keypoint, track_id in zip(r.boxes.xyxy, r.keypoints, track_ids):
+                    track = track_history[track_id]
+                    track.append((keypoint,box)) 
+                    if len(track) > NUM_FRAME:  # retain 90 tracks for 90 frames
+                        track.pop(0)
+                    boxes.append(r.boxes.xyxy)
+            if len(frame_buffer) == NUM_FRAME:
+                # Prepare a task with the accumulated frames
+                # frame_buffer = np.array(self.frame_buffer)
+                # keypoint_score = np.array(self.keypoint_score)
+                # keypoint_score = np.transpose(keypoint_score, axes=(1,0, 2 ))
+                # keypoint = np.transpose(keypoint, axes=(1, 0, 2,3))
+                task.add_item(track_history,frame_buffer  ,boxes)
+                # task = {
+                #     "track_history": track_history ,
+                #     'frame_buffer': frame_buffer,
+                #     'keypoint_score': keypoint_score,
+                #     'boxes': boxes
+                # }
 
-            # read buffer
-            frames = []
-            processed_frames = []
-            if len(self.buffer) != 0:
-                frames = self.buffer
-            if len(self.processed_buffer) != 0:
-                processed_frames = self.processed_buffer
+                # Clear the buffer for the next set of frames
 
-            # read and preprocess frames from source and update task
-            with self.read_lock:
-                before_read = time.time()
-                read_frame_cnt = self.window_size - len(frames)
-                while was_read and len(frames) < self.window_size:
-                    was_read, frame = self.cap.read()
-                    if not self.webcam:
-                        # Reading frames too fast may lead to unexpected
-                        # performance degradation. If you have enough
-                        # resource, this line could be commented.
-                        time.sleep(1 / self.output_fps)
-                    if was_read:
-                        frames.append(mmcv.imresize(frame, self.display_size))
-                        processed_frame = mmcv.imresize(
-                            frame, self.stdet_input_size).astype(np.float32)
-                        # _ = mmcv.imnormalize_(processed_frame,
-                        #                       **self.img_norm_cfg)
-                        processed_frames.append(processed_frame)
-            task.add_frames(self.read_id + 1, frames, processed_frames)
+                # Update read state and put the task into the read queue
+                # with self.read_id_lock:
+                #     self.read_id += 1
+                #     self.not_end = was_read
+                # task["id"]=copy.deepcopy(self.read_id)
+                read_queue.put((was_read, copy.deepcopy(task)))
+                for track_id, keypoint in track_history.items():
+                    track = track_history[track_id]
+                    if len(track) > 0: 
+                        track.clear()
+                poses.clear()
+                frame_buffer.clear()
+                # keypoint_score.clear()
+                boxes.clear()
 
-            # update buffer
-            if was_read:
-                self.buffer = frames[-self.buffer_size:]
-                self.processed_buffer = processed_frames[-self.buffer_size:]
-
-            # update read state
-            with self.read_id_lock:
-                self.read_id += 1
-                self.not_end = was_read
-
-            self.read_queue.put((was_read, copy.deepcopy(task)))
+        # If the loop ends but there are frames left in the buffer, put them as a task as well
             cur_time = time.time()
-            logger.debug(
-                f'Read thread: {1000*(cur_time - start_time):.0f} ms, '
-                f'{read_frame_cnt / (cur_time - before_read):.0f} fps')
+            # logger.debug(
+            #     f'Read thread: {1000*(cur_time - start_time):.0f} ms, '
+            #     f'{read_frame_cnt / (cur_time - before_read):.0f} fps')
             start_time = cur_time
+                    
 
-    def display_fn(self):
+    def display_fn(self,display_queue):
         """Main function for display thread.
 
         Read data from display queue and display predictions.
         """
-        start_time = time.time()
         while not self.stopped:
-            # get the state of the read thread
-            with self.read_id_lock:
-                read_id = self.read_id
-                not_end = self.not_end
 
-            with self.display_lock:
-                # If video ended and we have display all frames.
-                if not not_end and self.display_id == read_id:
-                    break
-
-                # If the next task are not available, wait.
-                if (len(self.display_queue) == 0 or
-                        self.display_queue.get(self.display_id + 1) is None):
-                    time.sleep(0.02)
-                    continue
-
-                # get display data and update state
-                self.display_id += 1
-                was_read, task = self.display_queue[self.display_id]
-                del self.display_queue[self.display_id]
-                display_id = self.display_id
-
-            # do display predictions
-            with self.output_lock:
-                if was_read and task.id == 0:
-                    # the first task
-                    cur_display_inds = range(self.display_inds[-1] + 1)
-                elif not was_read:
-                    # the last task
-                    cur_display_inds = range(self.display_inds[0],
-                                             len(task.frames))
-                else:
-                    cur_display_inds = self.display_inds
-
-                for frame_id in cur_display_inds:
-                    frame = task.frames[frame_id]
-                    if self.show:
-                        cv2.imshow('Demo', frame)
-                        cv2.waitKey(int(1000 / self.output_fps))
-                    if self.video_writer:
-                        self.video_writer.write(frame)
-
-            cur_time = time.time()
-            logger.debug(
-                f'Display thread: {1000*(cur_time - start_time):.0f} ms, '
-                f'read id {read_id}, display id {display_id}')
-            start_time = cur_time
+            self.display_id += 1
+            task = display_queue.get()
+            if task==None:
+                continue
+ 
+            for frame_id in range(NUM_FRAME):
+                frame = task.frame_buffer[frame_id]
+                if self.show:
+                    # cv2.imshow('Demo', frame)
+                    # cv2.waitKey(int(1000 / self.output_fps))
+                    pass
+                if self.video_writer:
+                    self.video_writer.write(frame)
 
     def __iter__(self):
         return self
@@ -868,6 +677,7 @@ class ClipHelper:
 
         This function is part of the main thread.
         """
+        
         if self.read_queue.qsize() == 0:
             time.sleep(0.02)
             return not self.stopped, None
@@ -889,11 +699,11 @@ class ClipHelper:
     def start(self):
         """Start read thread and display thread."""
         self.read_thread = threading.Thread(
-            target=self.read_fn, args=(), name='VidRead-Thread', daemon=True)
+            target=self.read_fn, args=(self.read_queue,), name='VidRead-Thread', daemon=True)
         self.read_thread.start()
         self.display_thread = threading.Thread(
             target=self.display_fn,
-            args=(),
+            args=(self.display_queue,),
             name='VidDisplay-Thread',
             daemon=True)
         self.display_thread.start()
@@ -903,14 +713,13 @@ class ClipHelper:
     def clean(self):
         """Close all threads and release all resources."""
         self.stopped = True
-        self.read_lock.acquire()
-        self.cap.release()
-        self.read_lock.release()
-        self.output_lock.acquire()
+        # self.read_lock.acquire()
+        # self.read_lock.release()
+        # self.output_lock.acquire()
         cv2.destroyAllWindows()
         if self.video_writer:
             self.video_writer.release()
-        self.output_lock.release()
+        # self.output_lock.release()
 
     def join(self):
         """Waiting for the finalization of read and display thread."""
@@ -924,8 +733,8 @@ class ClipHelper:
             task (TaskInfo object): task object that contain the necessary
             information for prediction visualization.
         """
-        with self.display_lock:
-            self.display_queue[task.id] = (True, task)
+        # with self.display_lock:
+        self.display_queue.put(copy.deepcopy(task) )
 
     def get_output_video_writer(self, path):
         """Return a video writer object.
@@ -956,29 +765,29 @@ class BaseVisualizer(metaclass=ABCMeta):
         # dense_n = int(predict_stepsize / output_stepsize)
         dense_n =8
         # output_timestamps = dense_timestamps(task.timestamps, dense_n)
-        output_timestamps = task.frames_inds
-        frames = [
-            # cv2.imread(task.frames[timestamp - 1])
-            task.frames[timestamp - 1]
-            for timestamp in output_timestamps
-        ]        
+        # output_timestamps = np.arange(30)
+        # frames = [
+        #     # cv2.imread(task["frame_buffer"][timestamp - 1])
+        #     task["frame_buffer"][timestamp - 1]
+        #     for timestamp in output_timestamps
+        # ]        
         
-        pose_datasample = [
-            task.stdet_poses_data_samples[timestamp - 1] for timestamp in output_timestamps
-        ]
+        # pose_datasample = [
+        #     task.stdet_poses_data_samples[timestamp - 1] for timestamp in output_timestamps
+        # ]
       
 
         # # draw predictions and update task
-        # keyframe_idx = len(task.frames) // 2
+        # keyframe_idx = len(task["frame_buffer"]) // 2
         # draw_range = [
         #     keyframe_idx - task.clip_vis_length // 2,
         #     keyframe_idx + (task.clip_vis_length - 1) // 2
         # ]
-        # assert draw_range[0] >= 0 and draw_range[1] < len(task.frames)
-        # task.frames = self.draw_clip_range(task.frames, task.action_preds,
+        # assert draw_range[0] >= 0 and draw_range[1] < len(task["frame_buffer"])
+        # task["frame_buffer"] = self.draw_clip_range(task["frame_buffer"], task.action_preds,
         #                                    bboxes, draw_range)
-        # task.frames  = self.draw_one_image(frames, task.action_preds,pose_datasample)
-        task.frames  = self.draw_one_image2(frames, pose_datasample)
+        task.frame_buffer  = self.draw_one_image(task.frame_buffer, task.stdet_results)
+        # task["frame_buffer"]  = self.draw_one_image2(frames, pose_datasample)
         return task
     def draw_one_image2(self, frames, pose_data_samples):
         """Draw predictions on one image."""
@@ -1053,7 +862,7 @@ class DefaultVisualizer(BaseVisualizer):
             plates are blue plate `03045e-023e8a-0077b6-0096c7-00b4d8-48cae4`
             and green plate `004b23-006400-007200-008000-38b000-70e000`. These
             plates are generated by https://coolors.co/.
-            Default: '03045e-023e8a-0077b6-0096c7-00b4d8-48cae4'.
+            Default: '03045e-023e8aclip_helper-0077b6-0096c7-00b4d8-48cae4'.
         text_fontface (int): Fontface from OpenCV for texts.
             Default: cv2.FONT_HERSHEY_DUPLEX.
         text_fontscale (float): Fontscale from OpenCV for texts.
@@ -1092,9 +901,9 @@ class DefaultVisualizer(BaseVisualizer):
         plate = plate.split('-')
         self.plate = [hex2color(h) for h in plate]
  
-    def draw_one_image(self, frames, annotations, pose_data_samples):
+    def draw_one_image(self, frames, annotations):
         """Draw predictions on one image."""
-        scale_ratio = np.array([self.clip.w, self.clip.h, self.clip.w, self.clip.h])
+        # scale_ratio = np.array([self.clip.w, self.clip.h, self.clip.w, self.clip.h])
         max_num=5
         assert max_num + 1 <= len(PLATEBLUE)
         nf, na = len(frames), len(annotations)
@@ -1104,25 +913,6 @@ class DefaultVisualizer(BaseVisualizer):
         # frames_ = [mmcv.imconvert(f, 'bgr', 'rgb') for f in frames_]
         anno = None
     # add pose results
-        if pose_data_samples:
-            pose_config = mmengine.Config.fromfile(self.pose_config)
-            visualizer = VISUALIZERS.build(pose_config.visualizer)
-            visualizer.set_dataset_meta(pose_data_samples[0].dataset_meta)
-            for i, (d, f) in enumerate(zip(pose_data_samples, frames_)):
-                visualizer.add_datasample(
-                    'result',
-                    f,
-                    data_sample=d,
-                    draw_gt=False,
-                    draw_heatmap=False,
-                    draw_bbox=True,
-                    show=False,
-                    wait_time=0,
-                    out_file=None,
-                    kpt_thr=0.3)
-                frames_[i] = visualizer.get_image()
-
-
         for i in range(na):
             anno = annotations[i]
             if anno is None :
@@ -1134,31 +924,37 @@ class DefaultVisualizer(BaseVisualizer):
                 # add action result for whole video
 
                 # add spatio-temporal action detection results
-                for ann in anno:
-                    box = ann[0]
-                    label = ann[1]
-                    if not len(label):
-                        continue
-                    score = ann[2]
-                    box = (box * scale_ratio).astype(np.int64)
-                    st, ed = tuple(box[:2]), tuple(box[2:])
-                    if not pose_data_samples:
-                        cv2.rectangle(frame, st, ed, PLATEBLUE[0], 2)
+                results = []
+                for track_id ,ann in anno.items():
+                    ann.sort(key=lambda x: -x[2])
+                    results.append(
+                    (ann[0][0].cpu().numpy().astype(np.int64), [x[1] for x in ann], [x[2]
+                                                            for x in ann]))
+                    for  k in results:
+                        box = k[0]
+                        label = k[1]
+                        if not len(label):
+                            continue
+                        score = k[2]
+                        # box = (box * scale_ratio).astype(np.int64)
+                        st, ed = tuple(box[:2]), tuple(box[2:])
+                        # if not pose_data_samples:
+                        #     cv2.rectangle(frame, st, ed, PLATEBLUE[0], 2)
 
-                    for k, lb in enumerate(label):
-                        if k >= max_num:
-                            break
-                        text = abbrev(lb)
-                        text = ': '.join([text, f'{score[k]:.3f}'])
-                        location = (0 + st[0], 18 + k * 18 + st[1])
-                        textsize = cv2.getTextSize(text, FONTFACE, FONTSCALE,
-                                                THICKNESS)[0]
-                        textwidth = textsize[0]
-                        diag0 = (location[0] + textwidth, location[1] - 14)
-                        diag1 = (location[0], location[1] + 2)
-                        cv2.rectangle(frame, diag0, diag1, PLATEBLUE[k + 1], -1)
-                        cv2.putText(frame, text, location, FONTFACE, FONTSCALE,
-                                    FONTCOLOR, THICKNESS, LINETYPE)
+                        for k, lb in enumerate(label):
+                            if k >= max_num:
+                                break
+                            text = abbrev(lb)
+                            text = ': '.join([text, f'{score[k]:.3f}'])
+                            location = (0 + st[0], 18 + k * 18 + st[1])
+                            textsize = cv2.getTextSize(text, FONTFACE, FONTSCALE,
+                                                    THICKNESS)[0]
+                            textwidth = textsize[0]
+                            diag0 = (location[0] + textwidth, location[1] - 14)
+                            diag1 = (location[0], location[1] + 2)
+                            cv2.rectangle(frame, diag0, diag1, PLATEBLUE[k + 1], -1)
+                            cv2.putText(frame, text, location, FONTFACE, FONTSCALE,
+                                        FONTCOLOR, THICKNESS, LINETYPE)
         return frames_
 
 
@@ -1202,12 +998,11 @@ def main(args):
         )
 
 
-
     # init visualizer
     vis = DefaultVisualizer(clip_helper=clip_helper,pose_config=args.pose_config)
-
     # start read and display thread
     clip_helper.start()
+    # Tracking with default tracker
 
     try:
         # Main thread main function contains:
@@ -1226,24 +1021,21 @@ def main(args):
                 # when no data in read queue, wait
                 time.sleep(0.01)
                 continue
-
-            inference_start = time.time()
-
             # get human bboxes
-            human_detector.predict(task)
-            pose_estimator.predict(task)
+            # human_detector.predict(task)
+            # pose_estimator.predict(task)
             # get stdet predictions
-            stdet_predictor.predict(task)
+            task =stdet_predictor.predict(task)
 
             # draw stdet predictions in raw frames
-            vis.draw_predictions(task)
+            task = vis.draw_predictions(task)
             # logger.info(f'Stdet Results: {task.action_preds}')
 
-            # add draw frames to display queue
             clip_helper.display(task)
-
-            logger.debug('Main thread inference time '
-                         f'{1000*(time.time() - inference_start):.0f} ms')
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+            # logger.debug('Main thread inference time '
+            #              f'{1000*(time.time() - inference_start):.0f} ms')
 
         # wait for display thread
         clip_helper.join()

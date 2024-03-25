@@ -118,7 +118,7 @@ data_root = 'data/coco/'
 file_client_args = dict(backend='disk')
 test_pipeline = [
     dict(type='LoadImageFromFile', file_client_args=file_client_args),
-    dict(type='mmdet.Resize', scale=(1333, 800), keep_ratio=True),
+    dict(type='mmdet.mmdet.Resize', scale=(1333, 800), keep_ratio=True),
     dict(
         type='mmdet.PackDetInputs',
         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
