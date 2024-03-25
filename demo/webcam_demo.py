@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from operator import itemgetter
 from threading import Thread
 import multiprocessing as mp
+import mmengine
 
 import cv2
 import numpy as np
@@ -35,6 +36,18 @@ EXCLUED_STEPS = [
 ]
 NUM_KEYPOINT=17
 NUM_FRAME=30
+def load_label_map(file_path):
+    """Load Label Map.
+
+    Args:
+        file_path (str): The file path of label map.
+
+    Returns:
+        dict: The label map (int -> label name).
+    """
+    lines = open(file_path).readlines()
+    lines = [x.strip().split(': ') for x in lines]
+    return {int(x[0]): x[1] for x in lines}
 def abbrev(name):
     """Get the abbreviation of label name:
 
@@ -50,7 +63,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description='MMAction2 webcam demo')
     parser.add_argument('config', help='test config file path')
     parser.add_argument('checkpoint', help='checkpoint file/url')
-    parser.add_argument('label', help='label file')
+    parser.add_argument(
+        '--label-map-stdet',
+        default='tools/data/ava/label_map.txt',
+        help='label map file for spatio-temporal action detection')
+    parser.add_argument(
+        '--label-map',
+        default='tools/data/kinetics/label_map_k400.txt',
+        help='label map file for action recognition')
     parser.add_argument(
         '--device', type=str, default='cuda:0', help='CPU/CUDA device option')
     parser.add_argument(
@@ -156,23 +176,27 @@ def show_results(result_queue):
                 time.sleep(sleep_time)
             cur_time = time.time()
 def inference_pose(pose_queue):
+    pose_deque=deque(maxlen=30)
+    predict_step=0
     yolo =YOLO('checkpoints/yolov8x-pose-p6.pt')
     while True:
         if len(frame_queue) != 0:
             r = yolo.track(frame_queue[0],persist=True,verbose=False)
-            pose_queue.put(copy.deepcopy(r[0]))
-                
+            pose_deque.append(r[0])
+        if len(pose_deque)==30 and predict_step==8:
+            pose_queue.put(copy.deepcopy(pose_deque))
+            predict_step=0
+        elif predict_step==8:
+            predict_step=0
+        predict_step+=1    
 def get_items_from_queue(queue, num_items):
     """Queue에서 num_items 개수만큼 아이템을 꺼내어 리스트로 반환"""
     keypoint=[]
     keypoint_score=[]
-    for _ in range(num_items):
-        if not queue.empty():  # 큐가 비어있지 않은 경우에만 아이템을 꺼냄
-            r = queue.get()
-            keypoint.append( r.keypoints.xy.cpu().numpy())
-            keypoint_score.append( r.keypoints.conf.cpu().numpy())
-        else:
-            break  # 큐가 비어있으면 루프 종료
+    r = queue.get()
+    for item in r:
+        keypoint.append( item.keypoints.xy.cpu().numpy())
+        keypoint_score.append( item.keypoints.conf.cpu().numpy())
     return keypoint ,keypoint_score
 def inference(pose_queue,queue,result_queue):
     data = queue.get()  # 첫 번째 아이템 (dict)
@@ -181,6 +205,9 @@ def inference(pose_queue,queue,result_queue):
     score_cache = deque()
     scores_sum = 0
     cur_time = time.time()
+    label_map = [x.strip() for x in open(args["label_map"]).readlines()]
+    num_class = len(label_map)
+    cfg.model.cls_head.num_classes = num_class  # for K400 dataset
     model = init_recognizer(cfg, args["checkpoint"], device=args["device"])
     while True:
         keypoint_score= []
@@ -225,7 +252,7 @@ def inference(pose_queue,queue,result_queue):
         # with torch.no_grad():
         output = inference_recognizer(model, cur_data)
         max_pred_index = output.pred_score.argmax().item()
-        label_map = [x.strip() for x in open(args["label"]).readlines()]
+        label_map = [x.strip() for x in open(args["label_map"]).readlines()]
         action_label = label_map[max_pred_index]
         action_score = output.pred_score[max_pred_index]
         my_list = []
@@ -268,6 +295,7 @@ def main():
     threshold = args.threshold
     drawing_fps = args.drawing_fps
     inference_fps = args.inference_fps
+    stdet_label_map = load_label_map(args.label_map_stdet)
 
     device = torch.device(args.device)
     out=None
@@ -288,7 +316,7 @@ def main():
                             modality='Pose',
                             total_frames=sample_length)
 
-    with open(args.label, 'r') as f:
+    with open(args.label_map, 'r') as f:
         label = [line.strip() for line in f]
 
     # prepare test pipeline from non-camera pipeline

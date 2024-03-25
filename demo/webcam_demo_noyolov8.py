@@ -165,6 +165,9 @@ def show_results(result_queue):
 def inference_pose(pose_queue):
     model = init_detector(config= "/home/bigdeal/mnt2/workspace/mmaction2/checkpoints/yolox_x_8x8_300e_coco.py", checkpoint="/home/bigdeal/mnt2/workspace/mmaction2/checkpoints/yolox_x_8x8_300e_coco_20211126_140254-1ef88d67.pth", device="cuda:0")
     model2 = init_model("checkpoints/yoloxpose_l_8xb32-300e_coco-640.py", "checkpoints/yoloxpose_l_8xb32-300e_coco-640-de0f8dee_20230829.pth", "cuda:0")
+    
+    pose_deque=deque(maxlen=30)
+    predict_step=0
     while True:
         if len(frame_queue) != 0:
             results = []
@@ -202,9 +205,14 @@ def inference_pose(pose_queue):
                 poses = pose_data_sample.pred_instances.to_dict()
                 results2.append(poses)
                 data_samples2.append(pose_data_sample)
+            pose_deque.append(results2[0])
 
-            pose_queue.put(copy.deepcopy(results2[0]))
-                        
+        if len(pose_deque)==30 and predict_step==8:
+            pose_queue.put(copy.deepcopy(pose_deque))
+            predict_step=0
+        elif predict_step==8:
+            predict_step=0
+        predict_step+=1
 def get_items_from_queue(queue, num_items):
     """Queue에서 num_items 개수만큼 아이템을 꺼내어 리스트로 반환"""
     pose_results=[]
@@ -221,13 +229,16 @@ def inference(pose_queue,queue,result_queue):
     cfg = queue.get()  # 두 번째 아이템 (argparse.Namespace)
     score_cache = deque()
     scores_sum = 0
-    cur_time = time.time()
+
     model = init_recognizer(cfg, args["checkpoint"], device=args["device"])
     while True:
         pose_results= []
+        start_time = time.time()
+        
         while len(pose_results) == 0:
             if pose_queue.qsize() > NUM_FRAME:
-                pose_results= get_items_from_queue(pose_queue, 30)
+                # pose_results= get_items_from_queue(pose_queue, 30)
+                pose_results = pose_queue.get()
         # frame_queue.append((np.array(r[0].keypoints.xy.cpu().numpy()),np.array(r[0].keypoints.conf.cpu().numpy())))
                 num_person =  max([len(x['keypoints']) for x in pose_results])
                 combined_keypoint = np.zeros((NUM_FRAME, num_person, NUM_KEYPOINT, 2),
@@ -271,9 +282,12 @@ def inference(pose_queue,queue,result_queue):
         my_list = []
         my_tuple= (action_label,action_score.cpu().numpy() )
         my_list.append(my_tuple)
+        end_time = time.time()
+        avg_inference_time = (end_time - start_time) / 100
+        print(f"Average inference time: {avg_inference_time} seconds")
         result_queue.put(copy.deepcopy(my_list))
         
-        # scores = result.pred_score.tolist()
+        # scores = result.pred_score.toli   st()
         # scores = np.array(scores)
         # score_cache.append(scores)
         # scores_sum += scores
