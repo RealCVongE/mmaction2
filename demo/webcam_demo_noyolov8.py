@@ -6,6 +6,13 @@ from collections import defaultdict, deque
 from operator import itemgetter
 from threading import Thread
 import multiprocessing as mp
+from mmdet.apis import inference_detector, init_detector
+from mmpose.apis.inference import init_model ,inference_topdown
+from mmengine.utils import track_iter_progress
+import numpy as np
+import time
+from mmpose.structures import PoseDataSample, merge_data_samples
+from mmengine.structures import InstanceData
 
 import cv2
 import numpy as np
@@ -156,24 +163,58 @@ def show_results(result_queue):
                 time.sleep(sleep_time)
             cur_time = time.time()
 def inference_pose(pose_queue):
-    yolo =YOLO('checkpoints/yolov8x-pose-p6.pt')
+    model = init_detector(config= "/home/bigdeal/mnt2/workspace/mmaction2/checkpoints/yolox_x_8x8_300e_coco.py", checkpoint="/home/bigdeal/mnt2/workspace/mmaction2/checkpoints/yolox_x_8x8_300e_coco_20211126_140254-1ef88d67.pth", device="cuda:0")
+    model2 = init_model("checkpoints/yoloxpose_l_8xb32-300e_coco-640.py", "checkpoints/yoloxpose_l_8xb32-300e_coco-640-de0f8dee_20230829.pth", "cuda:0")
     while True:
         if len(frame_queue) != 0:
-            r = yolo.track(frame_queue[0],persist=True,verbose=False)
-            pose_queue.put(copy.deepcopy(r[0]))
-                
+            results = []
+            data_samples = []
+            for frame_path in list(frame_queue):
+                det_data_sample= inference_detector(model, frame_path)
+                pred_instance = det_data_sample.pred_instances.cpu().numpy()
+                bboxes = pred_instance.bboxes
+                scores = pred_instance.scores
+                # We only keep human detection bboxs with score larger
+                # than `det_score_thr` and category id equal to `det_cat_id`.
+                valid_idx = np.logical_and(pred_instance.labels == 0,
+                                            pred_instance.scores > 0.9)
+                bboxes = bboxes[valid_idx]
+                scores = scores[valid_idx]
+                results.append(bboxes)
+                data_samples.append(det_data_sample)
+            results2 = []
+            data_samples2 = []
+            for f, d in list(zip(list(frame_queue), results)):
+                pose_data_samples = inference_topdown(model2, f, d[..., :4], bbox_format='xyxy')
+                pose_data_sample = merge_data_samples(pose_data_samples)
+                pose_data_sample.dataset_meta = model.dataset_meta
+                # make fake pred_instances
+                if not hasattr(pose_data_sample, 'pred_instances'):
+                    num_keypoints = model.dataset_meta['num_keypoints']
+                    pred_instances_data = dict(
+                        keypoints=np.empty(shape=(0, num_keypoints, 2)),
+                        keypoints_scores=np.empty(shape=(0, 17), dtype=np.float32),
+                        bboxes=np.empty(shape=(0, 4), dtype=np.float32),
+                        bbox_scores=np.empty(shape=(0), dtype=np.float32))
+                    pose_data_sample.pred_instances = InstanceData(
+                        **pred_instances_data)
+
+                poses = pose_data_sample.pred_instances.to_dict()
+                results2.append(poses)
+                data_samples2.append(pose_data_sample)
+
+            pose_queue.put(copy.deepcopy(results2[0]))
+                        
 def get_items_from_queue(queue, num_items):
     """Queue에서 num_items 개수만큼 아이템을 꺼내어 리스트로 반환"""
-    keypoint=[]
-    keypoint_score=[]
+    pose_results=[]
     for _ in range(num_items):
         if not queue.empty():  # 큐가 비어있지 않은 경우에만 아이템을 꺼냄
             r = queue.get()
-            keypoint.append( r.keypoints.xy.cpu().numpy())
-            keypoint_score.append( r.keypoints.conf.cpu().numpy())
+            pose_results.append( r)
         else:
             break  # 큐가 비어있으면 루프 종료
-    return keypoint ,keypoint_score
+    return pose_results 
 def inference(pose_queue,queue,result_queue):
     data = queue.get()  # 첫 번째 아이템 (dict)
     args = queue.get()  # 두 번째 아이템 (argparse.Namespace)
@@ -183,22 +224,21 @@ def inference(pose_queue,queue,result_queue):
     cur_time = time.time()
     model = init_recognizer(cfg, args["checkpoint"], device=args["device"])
     while True:
-        keypoint_score= []
-        while len(keypoint_score) == 0:
+        pose_results= []
+        while len(pose_results) == 0:
             if pose_queue.qsize() > NUM_FRAME:
-                keypoint, keypoint_score= get_items_from_queue(pose_queue, 30)
+                pose_results= get_items_from_queue(pose_queue, 30)
         # frame_queue.append((np.array(r[0].keypoints.xy.cpu().numpy()),np.array(r[0].keypoints.conf.cpu().numpy())))
-                num_person = max([len(x) for x in keypoint])
+                num_person =  max([len(x['keypoints']) for x in pose_results])
                 combined_keypoint = np.zeros((NUM_FRAME, num_person, NUM_KEYPOINT, 2),
                         dtype=np.float16)
                 combined_keypoint_score = np.zeros((NUM_FRAME, num_person, NUM_KEYPOINT),
                               dtype=np.float16)
-                for f_idx, frm_pose in enumerate(zip(keypoint,keypoint_score)):
-                    keypoint_m,keypoint_score_m = frm_pose 
-                    frm_num_persons = keypoint_m.shape[0]
+                for f_idx, frm_pose in enumerate(pose_results):
+                    frm_num_persons = frm_pose['keypoints'].shape[0]
                     for p_idx in range(frm_num_persons):
-                        combined_keypoint[f_idx, p_idx] = keypoint_m[p_idx]
-                        combined_keypoint_score[f_idx, p_idx] = keypoint_score_m[p_idx]
+                        combined_keypoint[f_idx, p_idx] = frm_pose['keypoints'][p_idx]
+                        combined_keypoint_score[f_idx, p_idx] = frm_pose['keypoint_scores'][p_idx]
 
                 # num_person = max([len(x['keypoints']) for x in pose_results])
 

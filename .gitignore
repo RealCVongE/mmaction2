@@ -156,3 +156,5 @@ Sample_anomaly/
 Sample_buying/
 softlink_retail
 *.pt
+*.engine
+*.onnx
