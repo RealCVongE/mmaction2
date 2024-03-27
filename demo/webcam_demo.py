@@ -379,7 +379,7 @@ def main():
         cfg.merge_from_dict(args.cfg_options)
 
     # Build the recognizer from a config file and checkpoint file/url
-    camera = cv2.VideoCapture(args.camera_id)
+    camera = cv2.VideoCapture("demo/test_video_structuralize.mp4")
     w = round(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = round(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
     sample_length=30
