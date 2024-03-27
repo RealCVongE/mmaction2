@@ -29,7 +29,7 @@ def count_mp4_files(path,end):
     for file in os.listdir(dir_path):
       full_path = os.path.join(dir_path, file)
       if os.path.isfile(full_path):
-        if file.endswith(f".{end}"):
+        if file.endswith(f".{end}") and not "매장이동" in full_path:
           mp4_count += 1
           mp4_files.append(full_path)
       elif os.path.isdir(full_path):
@@ -42,6 +42,8 @@ def run_extraction_on_files(mp4_files,path, new_path):
     for idx, file_path in enumerate(mp4_files):
         print("----------------------")
         print(idx)
+        print(file_path)
+        
         output_path = file_path.replace(path, new_path)
         output_path = output_path.replace('.mp4', '.pkl')
         if(os.path.exists(output_path)):

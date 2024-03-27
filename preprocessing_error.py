@@ -1,21 +1,6 @@
 import os
 import cv2
 import xmltodict
-import pickle
-def find_files(root_directory, partial_name):
-    """
-    주어진 루트 디렉토리에서 부분 이름을 포함하는 모든 파일의 경로를 찾습니다.
-
-    :param root_directory: 검색을 시작할 루트 디렉토리
-    :param partial_name: 찾고자 하는 파일 이름의 일부
-    :return: 찾은 파일의 전체 경로 목록
-    """
-    matching_files = []
-    for root, dirs, files in os.walk(root_directory):
-        for file in files:
-            if partial_name in file:
-                matching_files.append(os.path.join(root, file))
-    return matching_files
 def create_directory_recursively(path):
     try:
         # exist_ok=True 옵션은 해당 경로의 폴더가 이미 존재해도 에러를 발생시키지 않음
@@ -29,8 +14,8 @@ def create_directory_recursively(path):
         print(f"오류 발생: {e}")
 def cut_video(video_path, new_path,data_root_path ,start_frame,end_frame):
     new_video_path=video_path.replace(data_root_path, new_path)
+    
     output_path = f'{new_video_path[:-4]}_{start_frame}_{end_frame}.mp4'
-    new_video_list.append(output_path)
     if(os.path.exists(output_path)):
         print("이미 컷편집을 완료했습니다.")
         print("*************")
@@ -119,12 +104,7 @@ print(f"mp4 파일 목록: {len(mp4_files)}")
 print(f"mp4 파일 목록: {mp4_files[0]}")
 print(f"mp4 파일 목록: {xml_files[0]}")
 # 영상 파일 경로
-erro_xml_list=[]
-erro_video_list=[]
-erro_xml2_list=[]
-erro_video2_list=[]
-new_video_list=[]
-new_video2_list=[]
+
 for idx, j in enumerate(mp4_files):
     data_root_path= "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/01-1.정식개방데이터"
     new_path= "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/PreProcess"
@@ -165,36 +145,16 @@ for idx, j in enumerate(mp4_files):
     #                 end_q.append(moving_end)
     #     else:
     #         continue
-
     #     start_q=sorted(start_q)
     #     end_q= sorted(end_q)
     #     print("start_q",start_q)
     #     print("end_q",end_q)
-    #     if(len(start_q)!=len(end_q)):
-    #         print("erro_xml2------------------------------")
-    #         print(filtered_items[0])
-    #         print("erro_xml2******************************")
-    #         erro_xml2_list.append(filtered_items[0])
-    #         erro_video2_list.append(j)
     #     shorter_list_count = min(len(start_q), len(end_q))
     #     for i in range(shorter_list_count):
-    #         if(len(start_q)!=len(end_q)):
-    #             new_video_path=j.replace(data_root_path, new_path)
-    #             new_video_dir = os.path.dirname(new_video_path)
-    #             partial_name=new_video_path.split("/")[-1][:-4]
-    #             remove_path=find_files(new_video_dir,partial_name)
-    #             print("remove_path")
-    #             print(remove_path)
-    #             for m in remove_path:
-    #                 if os.path.exists(m):
-    #                     # 파일 제거
-    #                     os.remove(m)
-    #                     print(f"{m} 파일이 제거되었습니다.")
-    #                 else:
-    #                     print(f"{m} 파일을 찾을 수 없습니다.")
     #         start_frame = start_q.pop(0)
     #         end_frame = end_q.pop(0)
-    #         cut_video( j,new_path,data_root_path,start_frame,end_frame)            
+    #         cut_video( j,new_path,data_root_path,start_frame,end_frame)
+
 
         
     else:
@@ -237,40 +197,8 @@ for idx, j in enumerate(mp4_files):
         end_q= sorted(end_q)
         print("start_q",start_q)
         print("end_q",end_q)
-        if(len(start_q)!=len(end_q)):
-            print("erro_xml------------------------------")
-            print(filtered_items[0])
-            print("erro_xml******************************")
-            erro_xml_list.append(filtered_items[0])
-            erro_video_list.append(j)
         shorter_list_count = min(len(start_q), len(end_q))
         for i in range(shorter_list_count):
-            if(len(start_q)!=len(end_q)):
-                new_video_path=j.replace(data_root_path, new_path)
-                new_video_dir = os.path.dirname(new_video_path)
-                partial_name=new_video_path.split("/")[-1][:-4]
-                remove_path=find_files(new_video_dir,partial_name)
-                print("remove_path")
-                print(remove_path)
-                for m in remove_path:
-                    if os.path.exists(m):
-                        # 파일 제거
-                        os.remove(m)
-                        print(f"{m} 파일이 제거되었습니다.")
-                    else:
-                        print(f"{m} 파일을 찾을 수 없습니다.")
             start_frame = start_q.pop(0)
             end_frame = end_q.pop(0)
-
             cut_video( j,new_path,data_root_path,start_frame,end_frame)
-with open("output_xml_error.pkl", 'wb') as file2:
-    pickle.dump(erro_xml_list, file2)
-with open("output_video_error.pkl", 'wb') as file2:
-    pickle.dump(erro_video_list, file2)
-    
-                
-with open("output_xml_moving_error.pkl", 'wb') as file2:
-    pickle.dump(erro_xml2_list, file2)
-with open("output_video_moving_error.pkl", 'wb') as file2:
-    pickle.dump(erro_video2_list, file2)
-
