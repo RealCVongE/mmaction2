@@ -1,0 +1,6 @@
+[submodule "HR-pro"]
+	path = HR-pro
+	url = https://github.com/RealCVongE/HR-Pro.git
+[submodule "video_feature"]
+	path = video_feature
+	url = https://github.com/RealCVongE/video_features.git
