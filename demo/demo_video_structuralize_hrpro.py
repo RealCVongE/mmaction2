@@ -1,4 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import sys
+sys.path.append('/home/bigdeal/mnt2/workspace/mmaction2/video_feature')
+sys.path.append('/home/bigdeal/mnt2/workspace/mmaction2/HR-pro')
 import argparse
 import copy as cp
 import tempfile
@@ -13,11 +16,14 @@ from typing import Optional
 import torch
 from mmengine import DictAction
 from mmengine.structures import InstanceData
+from omegaconf import OmegaConf
 
 from mmaction.apis import (detection_inference, inference_recognizer,
                            inference_skeleton, init_recognizer, pose_inference)
 from mmaction.registry import VISUALIZERS
 from mmaction.structures import ActionDataSample
+from video_feature.video_extract import ExtractI3D  
+from HR_pro import optimization 
 
 try:
     from mmdet.apis import init_detector
@@ -606,12 +612,36 @@ def frame_extract(video_path: str,
 def main():
     args = parse_args()
     tmp_dir = tempfile.TemporaryDirectory()
-    frame_paths, original_frames ,time_per_frame, fps = frame_etract(
+    frame_paths, original_frames ,time_per_frame, fps = frame_extract(
         args.video, out_dir=tmp_dir.name)
     num_frame = len(frame_paths)
     h, w, _ = original_frames[0].shape
-
+    #TODO: video_extraction
+    args = OmegaConf.create({
+    'feature_type': 'i3d',
+    'device': 'cuda:0',  # 또는 'cpu'를 사용하시면 됩니다.
+    'on_extraction': 'ignore',  # 이 설정은 무시될 것입니다.
+    'output_path': 'ignore',  # 이 설정도 무시됩니다.
+    'stack_size': 16,  # 이 값들은 예시이며 실제 값으로 대체해야 합니다.
+    'step_size': 16,
+    'streams': None,
+    'flow_type': 'raft',
+    'extraction_fps': 25,
+    'tmp_path': './tmp/i3d',
+    'keep_tmp_files': False,
+    'show_pred': False,
+    'config': None
+    # 여기에 args_cli에 필요한 나머지 설정을 추가하십시오.
+})  
+    extractor = ExtractI3D(args)
+    features = extractor.extract(original_frames)
+    rgb_features = features['rgb']
+    flow_features = features['flow']
+    concatenated_features = np.concatenate((rgb_features, flow_features), axis=1)
+    print(concatenated_features.shape)
+    final_proposal =  optimization.hr_pro(optimization.parse_args(),concatenated_features)
     # Get Human detection results and pose results
+    
     human_detections, _ = detection_inference(
         args.det_config,
         args.det_checkpoint,

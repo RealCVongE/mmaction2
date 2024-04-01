@@ -163,7 +163,7 @@ def count_mp4_files(path,end):
   return mp4_count, mp4_files
 
 # 예시 코드
-path = "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/01-1.정식개방데이터"
+path = "/home/bigdeal/mnt2/238-2.실내(편의점,_매장)_사람_이상행동_데이터/01-1.정식개방데이터"
 xml_count, xml_files = count_mp4_files(path,"xml")
 print(xml_count)
 
@@ -186,14 +186,14 @@ print(data)
 import copy
 import pickle
 import numpy as np  
-root_directory = "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/PreProcessToPkl" # 검색을 시작할 루트 디렉토리 경로로 변경하세요.
+root_directory = "/home/bigdeal/mnt2/238-2.실내(편의점,_매장)_사람_이상행동_데이터/PreProcessToPkl" # 검색을 시작할 루트 디렉토리 경로로 변경하세요.
 error_list=[]
 action_list= [
-    "select_start","select_end",
-    "test_start", "test_end",
-    "buying_start", "buying_end",
-    "return_start", "return_end",
-    "compare_start", "compare_end"
+    "theft_start","theft_end",
+    # "test_start", "test_end",
+    # "buying_start", "buying_end",
+    # "return_start", "return_end",
+    # "compare_start", "compare_end"
     ]
 for idx, xml_file in enumerate(xml_files):
     print("-------------------",idx)
@@ -275,6 +275,8 @@ for idx, xml_file in enumerate(xml_files):
             print(new_data_keypoint.shape)
             new_data_keypoint_score=np.array(new_data_keypoint_score_list)
             print(new_data_keypoint_score.shape)
+            if(len(new_data_keypoint.shape)==len(new_data_keypoint_score.shape) ):
+                continue
             data["keypoint"] = new_data_keypoint.transpose((1, 0, 2, 3))
             data["keypoint_score"] = new_data_keypoint_score.transpose((1, 0, 2))
             print("바뀐keypoint:",data["keypoint"].shape)
