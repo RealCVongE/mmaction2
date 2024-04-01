@@ -601,12 +601,12 @@ def frame_extract(video_path: str,
         cnt += 1
         flag, frame = vid.read()
 
-    return frame_paths, frames ,timestamps
+    return frame_paths, frames ,time_per_frame, fps
 
 def main():
     args = parse_args()
     tmp_dir = tempfile.TemporaryDirectory()
-    frame_paths, original_frames, timestamps = frame_extract(
+    frame_paths, original_frames ,time_per_frame, fps = frame_etract(
         args.video, out_dir=tmp_dir.name)
     num_frame = len(frame_paths)
     h, w, _ = original_frames[0].shape
@@ -711,7 +711,7 @@ def main():
 
     vis_frames = visualize(args, frames, stdet_results, pose_datasample,
                            action_result)
-    vid = mpy.ImageSequenceClip(vis_frames, fps=args.output_fps)
+    vid = mpy.ImageSequenceClip(vis_frames, fps=fps)
     vid.write_videofile(args.out_filename)
 
     tmp_dir.cleanup()
