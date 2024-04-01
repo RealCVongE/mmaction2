@@ -7,7 +7,6 @@ from operator import itemgetter
 from threading import Thread
 import multiprocessing as mp
 import mmengine
-import mmcv
 
 import cv2
 import numpy as np
@@ -15,6 +14,11 @@ import torch
 from mmengine import Config, DictAction
 from mmengine.dataset import Compose, pseudo_collate
 from ultralytics import YOLO
+from mmdet.apis import inference_detector, init_detector
+from mmpose.apis.inference import init_model ,inference_topdown
+from mmpose.structures import PoseDataSample, merge_data_samples
+from mmengine.structures import InstanceData
+from mmengine import Config, DictAction
 
 from mmaction.apis import init_recognizer
 from mmaction.apis.inference import inference_recognizer
@@ -37,6 +41,23 @@ EXCLUED_STEPS = [
 ]
 NUM_KEYPOINT=17
 NUM_FRAME=30
+def expand_bbox(bbox, h, w, ratio=1.25):
+    x1, y1, x2, y2 = bbox
+    center_x = (x1 + x2) // 2
+    center_y = (y1 + y2) // 2
+    width = x2 - x1
+    height = y2 - y1
+
+    square_l = max(width, height)
+    new_width = new_height = square_l * ratio
+
+    new_x1 = max(0, int(center_x - new_width / 2))
+    new_x2 = min(int(center_x + new_width / 2), w)
+    new_y1 = max(0, int(center_y - new_height / 2))
+    new_y2 = min(int(center_y + new_height / 2), h)
+    return (new_x1, new_y1, new_x2, new_y2)
+
+
 def load_label_map(file_path):
     """Load Label Map.
 
@@ -58,20 +79,30 @@ def abbrev(name):
         st, ed = name.find('('), name.find(')')
         name = name[:st] + '...' + name[ed + 1:]
     return name
+def cal_iou(box1, box2):
+    xmin1, ymin1, xmax1, ymax1 = box1
+    xmin2, ymin2, xmax2, ymax2 = box2
 
+    s1 = (xmax1 - xmin1) * (ymax1 - ymin1)
+    s2 = (xmax2 - xmin2) * (ymax2 - ymin2)
+
+    xmin = max(xmin1, xmin2)
+    ymin = max(ymin1, ymin2)
+    xmax = min(xmax1, xmax2)
+    ymax = min(ymax1, ymax2)
+
+    w = max(0, xmax - xmin)
+    h = max(0, ymax - ymin)
+    intersect = w * h
+    union = s1 + s2 - intersect
+    iou = intersect / union
+
+    return iou
 
 def parse_args():
     parser = argparse.ArgumentParser(description='MMAction2 webcam demo')
     parser.add_argument('config', help='test config file path')
     parser.add_argument('checkpoint', help='checkpoint file/url')
-    # parser.add_argument(
-    #     '--label-map-stdet',
-    #     default='checkpoints/label_map_my_stdet.txt',
-    #     help='label map file for spatio-temporal action detection')
-    # parser.add_argument(
-    #     '--label-map',
-    #     default='checkpoints/label_map_my.txt',
-    #     help='label map file for action recognition')
     parser.add_argument(
         '--label-map-stdet',
         default='tools/data/ava/label_map.txt',
@@ -225,25 +256,58 @@ def show_results(result_queue,result_queue_stdet):
                 time.sleep(sleep_time)
             cur_time = time.time()
 def inference_pose(pose_queue,pose_queue_stdet):
+    model = init_detector(config= "/home/bigdeal/mnt2/workspace/mmaction2/checkpoints/yolox_x_8x8_300e_coco.py", checkpoint="/home/bigdeal/mnt2/workspace/mmaction2/checkpoints/yolox_x_8x8_300e_coco_20211126_140254-1ef88d67.pth", device="cuda:0")
+    model2 = init_model("checkpoints/yoloxpose_l_8xb32-300e_coco-640.py", "checkpoints/yoloxpose_l_8xb32-300e_coco-640-de0f8dee_20230829.pth", "cuda:0")
+    
+    pose_deque=deque(maxlen=30)
+    bbox_deque=deque(maxlen=30)
     predict_step=0
-    predict_step_stdet=0
-    yolo =YOLO('checkpoints/yolov8x-pose-p6.pt')
     while True:
         if len(frame_queue) != 0:
-            r = yolo.track(frame_queue[0],persist=True,verbose=False)
-            pose_deque.append(r[0])
-        if len(pose_deque)==30 and predict_step_stdet==8:
-            pose_queue_stdet.put(copy.deepcopy(pose_deque))
-            predict_step_stdet=0
-        elif predict_step_stdet==8:
-            predict_step_stdet=0
-        if len(pose_deque)==30 and predict_step==30:
-            pose_queue.put(copy.deepcopy(pose_deque))
+            results = []
+            data_samples = []
+            for frame_path in list(frame_queue):
+                det_data_sample= inference_detector(model, frame_path)
+                pred_instance = det_data_sample.pred_instances.cpu().numpy()
+                bboxes = pred_instance.bboxes
+                scores = pred_instance.scores
+                # We only keep human detection bboxs with score larger
+                # than `det_score_thr` and category id equal to `det_cat_id`.
+                valid_idx = np.logical_and(pred_instance.labels == 0,
+                                            pred_instance.scores > 0.9)
+                bboxes = bboxes[valid_idx]
+                scores = scores[valid_idx]
+                results.append(bboxes)
+                data_samples.append(det_data_sample)
+            bbox_deque.append(results[0])
+            results2 = []
+            data_samples2 = []
+            for f, d in list(zip(list(frame_queue), results)):
+                pose_data_samples = inference_topdown(model2, f, d[..., :4], bbox_format='xyxy')
+                pose_data_sample = merge_data_samples(pose_data_samples)
+                pose_data_sample.dataset_meta = model.dataset_meta
+                # make fake pred_instances
+                if not hasattr(pose_data_sample, 'pred_instances'):
+                    num_keypoints = model.dataset_meta['num_keypoints']
+                    pred_instances_data = dict(
+                        keypoints=np.empty(shape=(0, num_keypoints, 2)),
+                        keypoints_scores=np.empty(shape=(0, 17), dtype=np.float32),
+                        bboxes=np.empty(shape=(0, 4), dtype=np.float32),
+                        bbox_scores=np.empty(shape=(0), dtype=np.float32))
+                    pose_data_sample.pred_instances = InstanceData(
+                        **pred_instances_data)
+
+                poses = pose_data_sample.pred_instances.to_dict()
+                results2.append(poses)
+                data_samples2.append(pose_data_sample)
+            pose_deque.append(results2[0])
+
+        if len(pose_deque)==30 and predict_step==8:
+            pose_queue_stdet.put((copy.deepcopy(pose_deque),copy.deepcopy(bbox_deque)))
             predict_step=0
-        elif predict_step==30:
+        elif predict_step==8:
             predict_step=0
-        predict_step+=1    
-        predict_step_stdet+=1
+        predict_step+=1
 def get_items_from_queue(queue):
     """Queue에서 num_items 개수만큼 아이템을 꺼내어 리스트로 반환"""
     keypoint=[]
@@ -275,15 +339,15 @@ def inference(pose_queue,queue,result_queue):
     score_cache = deque()
     scores_sum = 0
     cur_time = time.time()
-    label_map = [x.strip() for x in open(args["label_map"]).readlines()]
-    num_class = len(label_map)
+    label_map = load_label_map(args["label_map_stdet"])
+    num_class = max(label_map.keys()) + 1  # for AVA dataset (81)
     skeleton_config = mmengine.Config.fromfile(args["config"])
     skeleton_config.model.cls_head.num_classes = num_class  # for K400 dataset
     model = init_recognizer(skeleton_config, args["checkpoint"], device=args["device"])
     while True:
         keypoint_score= []
         while len(keypoint_score) == 0:
-            if pose_queue.qsize() > 0:
+            if pose_queue.qsize() >= NUM_FRAME:
                 keypoint, keypoint_score= get_items_from_queue(pose_queue)
         # frame_queue.append((np.array(r[0].keypoints.xy.cpu().numpy()),np.array(r[0].keypoints.conf.cpu().numpy())))
                 num_person = max([len(x) for x in keypoint])
@@ -300,7 +364,6 @@ def inference(pose_queue,queue,result_queue):
 
 
         cur_data = data.copy()
-        cur_data['total_frames'] = combined_keypoint_score.shape[0]
         cur_data['keypoint'] = combined_keypoint.transpose((1, 0, 2, 3))
         cur_data['keypoint_score'] = combined_keypoint_score.transpose((1, 0, 2))
 
@@ -311,7 +374,6 @@ def inference(pose_queue,queue,result_queue):
         my_list = []
         my_tuple= (action_label,action_score.cpu().numpy() )
         my_list.append(my_tuple)
-        print(my_list)
         result_queue.put(copy.deepcopy(my_list))
 def inference_stdet(pose_queue_stdet,queue,result_queue_stdet):
     data = queue.get()  # 첫 번째 아이템 (dict)
@@ -329,43 +391,59 @@ def inference_stdet(pose_queue_stdet,queue,result_queue_stdet):
     while True:
         keypoint_score= []
         while len(keypoint_score) == 0:
-            if pose_queue_stdet.qsize() > 0:
-                track_history= get_items_from_queue_stdet(pose_queue_stdet)
+            if pose_queue_stdet.qsize() >= NUM_FRAME:
+                pose_results ,bbox_results = pose_queue_stdet.get()
         # frame_queue.append((np.array(r[0].keypoints.xy.cpu().numpy()),np.array(r[0].keypoints.conf.cpu().numpy())))
                 
-                combined_keypoint = np.zeros((NUM_FRAME, 1, NUM_KEYPOINT, 2),
+                combined_keypoint = np.zeros(( 1,NUM_FRAME, NUM_KEYPOINT, 2),
                         dtype=np.float16)
-                combined_keypoint_score = np.zeros((NUM_FRAME, 1, NUM_KEYPOINT),
+                combined_keypoint_score = np.zeros(( 1,NUM_FRAME, NUM_KEYPOINT),
                               dtype=np.float16)
-                my_list = []
-                for track_id , item in track_history.items():
-                    one_person_keypoint_score=[]
-                    one_person_keypoint=[]
-                    box=item[0][2]
-                    for j in item:
-                        item_keypoint,item_keypoint_score,item_box= j
-                        one_person_keypoint.append(item_keypoint)
-                        one_person_keypoint_score.append(item_keypoint_score)
-                    combined_keypoint_score=np.array(one_person_keypoint_score)
-                    combined_keypoint=np.array(one_person_keypoint)
+
+                skeleton_prediction = []
+                for i in range(bbox_results[0].shape[0]):  # num_person
+                    skeleton_prediction.append([])
+
+
+                    num_person = 1
+
+                    num_keypoint = 17
+
+                    # pose matching
+                    person_bbox = bbox_results[0][i][:4]
+                    area = expand_bbox(person_bbox, data["img_shape"][0], data["img_shape"][1])
+
+                    for j, poses in enumerate(pose_results):  # num_frame
+                        max_iou = float('-inf')
+                        index = -1
+                        if len(poses['keypoints']) == 0:
+                            continue
+                        for k, bbox in enumerate(poses['bboxes']):
+                            iou = cal_iou(bbox, area)
+                            if max_iou < iou:
+                                index = k
+                                max_iou = iou
+                        combined_keypoint[0, j] = poses['keypoints'][index]
+                        combined_keypoint_score[0, j] = poses['keypoint_scores'][index]
+
                     cur_data = data.copy()
+                    cur_data['total_frames'] = combined_keypoint_score.shape[0]
                     cur_data['keypoint'] = combined_keypoint.transpose((1, 0, 2, 3))
                     cur_data['keypoint_score'] = combined_keypoint_score.transpose((1, 0, 2))
-                    cur_data["total_frames"]=combined_keypoint.shape[0]
+
                     output = inference_recognizer(model, cur_data)
-                                # for multi-label recognition
+                    # for multi-label recognition
                     score = output.pred_score.tolist()
-                    skeleton_prediction=[]
                     for k in range(len(score)):  # 81
                         if k not in label_map:
                             continue
                         if score[k] > args["action_score_thr"]:
-                            skeleton_prediction.append((label_map[k], score[k]))
+                            skeleton_prediction[i].append((label_map[k], score[k]))
 
-                    print(f"track_id:{track_id},action_label: {skeleton_prediction},box:{box.cpu().numpy()}")
-                    my_tuple= (track_id,skeleton_prediction,box.cpu().numpy() )
-                    my_list.append(my_tuple)
-                result_queue_stdet.put(copy.deepcopy(my_list))
+                    print(f" {skeleton_prediction}")
+                    # my_tuple= (track_id,skeleton_prediction,box.cpu().numpy() )
+                    # my_list.append(my_tuple)
+                # result_queue_stdet.put(copy.deepcopy(my_list))
 
 
 def main():
@@ -387,12 +465,9 @@ def main():
         cfg.merge_from_dict(args.cfg_options)
 
     # Build the recognizer from a config file and checkpoint file/url
-    # camera = cv2.VideoCapture("/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/01-1.정식개방데이터/Validation/01.원천데이터/VS_02.구매행동_02.선택/C_2_2_65_BU_SYB_10-15_10-03-46_CA_RGB_DF1_F4_F4.mp4")
     camera = cv2.VideoCapture("demo/test_video_structuralize.mp4")
     w = round(camera.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = round(camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    new_w, new_h = mmcv.rescale_size((w, h), (256, np.Inf))
-    w_ratio, h_ratio = new_w / w, new_h / h
     sample_length=30
     data = dict(frame_dict='',
                             label=-1,
@@ -444,14 +519,14 @@ def main():
         pw = Thread(target=show_results, args=(result_queue,result_queue_stdet), daemon=True)
         ps = Thread(target=inference_pose, args=(pose_queue,pose_queue_stdet,), daemon=True)
         # pr = Thread(target=inference, args=(), daemon=True)
-        pr = mp.Process(target=inference, args=(pose_queue,queue,result_queue,))
+        # pr = mp.Process(target=inference, args=(pose_queue,queue,result_queue,))
         pr2 = mp.Process(target=inference_stdet, args=(pose_queue_stdet,queue2,result_queue_stdet,))
         pw.start()
         ps.start()
-        pr.start()
+        # pr.start()
         pr2.start()
         pw.join()
-        pr.join()
+        # pr.join()
         pr2.join()
         ps.join()
     except KeyboardInterrupt:

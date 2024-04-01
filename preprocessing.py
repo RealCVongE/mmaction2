@@ -97,7 +97,7 @@ def count_mp4_files(path,end):
     for file in os.listdir(dir_path):
       full_path = os.path.join(dir_path, file)
       if os.path.isfile(full_path):
-        if file.endswith(f".{end}") and not "매장이동" in full_path:
+        if file.endswith(f".{end}") and  "선택" in full_path:
           mp4_count += 1
           mp4_files.append(full_path)
       elif os.path.isdir(full_path):
@@ -108,7 +108,7 @@ def count_mp4_files(path,end):
   return mp4_count, mp4_files
 
 # 예시 코드
-path = "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/01-1.정식개방데이터"
+path = "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/01-1.정식개방데이터/Validation"
 mp4_count, mp4_files = count_mp4_files(path,"mp4")
 xml_count, xml_files = count_mp4_files(path,"xml")
 
@@ -125,9 +125,10 @@ erro_xml2_list=[]
 erro_video2_list=[]
 new_video_list=[]
 new_video2_list=[]
+count=0 #  700 90 35 40
 for idx, j in enumerate(mp4_files):
-    data_root_path= "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/01-1.정식개방데이터"
-    new_path= "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/PreProcess"
+    data_root_path= "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/01-1.정식개방데이터/Validation"
+    new_path= "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/PreProcessToNewSelect/Validation"
     # XML 파일을 열고 읽기
     print("------")
     print(idx)
@@ -200,8 +201,11 @@ for idx, j in enumerate(mp4_files):
     else:
         
         path_parts = j.split('/')
+        print("path_parts[-1]")
         print(path_parts[-1])
         filtered_items = [item for item in xml_files if path_parts[-1][:-3] in item]
+        if(filtered_items==[]):
+            continue
         print(filtered_items[0])
 
         action_list= [
@@ -259,18 +263,24 @@ for idx, j in enumerate(mp4_files):
                         print(f"{m} 파일이 제거되었습니다.")
                     else:
                         print(f"{m} 파일을 찾을 수 없습니다.")
-            start_frame = start_q.pop(0)
-            end_frame = end_q.pop(0)
-
+            start_frame = start_q.pop(0)-35
+            if(start_frame<0):
+                start_frame=0
+            end_frame = end_q.pop(0)+5
+            if(end_frame>int(dict_data["annotations"]['meta']["task"]["stop_frame"])):
+                end_frame=int(dict_data["annotations"]['meta']["task"]["stop_frame"])
+            if(count>90):
+                break
+            count+=1
             cut_video( j,new_path,data_root_path,start_frame,end_frame)
-with open("output_xml_error.pkl", 'wb') as file2:
-    pickle.dump(erro_xml_list, file2)
-with open("output_video_error.pkl", 'wb') as file2:
-    pickle.dump(erro_video_list, file2)
+# with open("output_xml_error.pkl", 'wb') as file2:
+#     pickle.dump(erro_xml_list, file2)
+# with open("output_video_error.pkl", 'wb') as file2:
+#     pickle.dump(erro_video_list, file2)
     
                 
-with open("output_xml_moving_error.pkl", 'wb') as file2:
-    pickle.dump(erro_xml2_list, file2)
-with open("output_video_moving_error.pkl", 'wb') as file2:
-    pickle.dump(erro_video2_list, file2)
+# with open("output_xml_moving_error.pkl", 'wb') as file2:
+#     pickle.dump(erro_xml2_list, file2)
+# with open("output_video_moving_error.pkl", 'wb') as file2:
+#     pickle.dump(erro_video2_list, file2)
 
