@@ -29,7 +29,7 @@ def count_mp4_files(path,end):
     for file in os.listdir(dir_path):
       full_path = os.path.join(dir_path, file)
       if os.path.isfile(full_path):
-        if file.endswith(f".{end}") and not "매장이동" in full_path:
+        if file.endswith(f".{end}") :
           mp4_count += 1
           mp4_files.append(full_path)
       elif os.path.isdir(full_path):
@@ -58,8 +58,8 @@ def run_extraction_on_files(mp4_files,path, new_path):
         proc.wait()
         print("************************")
 # 예시 코드
-path = "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/PreProcess"
-new_path = "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/PreProcessToPkl"
+path = "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/PreProcessToNewSelect"
+new_path = "/home/bigdeal/mnt2/238-1.실내(편의점,_매장)_사람_구매행동_데이터/PreProcessToPklNewSelect"
 mp4_count, mp4_files = count_mp4_files(path,"mp4")
 
 print(f"총 mp4 파일 개수: {mp4_count}")

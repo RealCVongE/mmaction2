@@ -3,11 +3,13 @@ import argparse
 import copy as cp
 import tempfile
 import warnings
-
+import os.path as osp
+import os
 import cv2
 import mmcv
 import mmengine
 import numpy as np
+from typing import Optional
 import torch
 from mmengine import DictAction
 from mmengine.structures import InstanceData
@@ -16,7 +18,6 @@ from mmaction.apis import (detection_inference, inference_recognizer,
                            inference_skeleton, init_recognizer, pose_inference)
 from mmaction.registry import VISUALIZERS
 from mmaction.structures import ActionDataSample
-from mmaction.utils import frame_extract
 
 try:
     from mmdet.apis import init_detector
@@ -555,11 +556,57 @@ def rgb_based_stdet(args, frames, label_map, human_detections, w, h, new_w,
 
     return timestamps, predictions
 
+def frame_extract(video_path: str,
+                  short_side: Optional[int] = None,
+                  out_dir: str = './tmp'):
+    """Extract frames given video_path.
+
+    Args:
+        video_path (str): The video path.
+        short_side (int): Target short-side of the output image.
+            Defaults to None, means keeping original shape.
+        out_dir (str): The output directory. Defaults to ``'./tmp'``.
+    """
+    # Load the video, extract frames into OUT_DIR/video_name
+    target_dir = osp.join(out_dir, osp.basename(osp.splitext(video_path)[0]))
+    os.makedirs(target_dir, exist_ok=True)
+    # Should be able to handle videos up to several hours
+    frame_tmpl = osp.join(target_dir, 'img_{:06d}.jpg')
+    assert osp.exists(video_path), f'file not exit {video_path}'
+    vid = cv2.VideoCapture(video_path)
+    frames = []
+    frame_paths = []
+    timestamps = []
+    flag, frame = vid.read()
+    cnt = 0
+    fps = vid.get(cv2.CAP_PROP_FPS)  
+    new_h, new_w = None, None
+    # 한 프레임당 시간 계산
+    time_per_frame = 1 / fps
+
+    while flag:
+        if short_side is not None:
+            if new_h is None:
+                h, w, _ = frame.shape
+                new_w, new_h = mmcv.rescale_size((w, h), (short_side, np.Inf))
+            frame = mmcv.imresize(frame, (new_w, new_h))
+
+        frames.append(frame)
+        frame_path = frame_tmpl.format(cnt + 1)
+        frame_paths.append(frame_path)
+
+        cv2.imwrite(frame_path, frame)
+        timestamp = cnt / fps
+        timestamps.append(timestamp)
+        cnt += 1
+        flag, frame = vid.read()
+
+    return frame_paths, frames ,timestamps
 
 def main():
     args = parse_args()
     tmp_dir = tempfile.TemporaryDirectory()
-    frame_paths, original_frames = frame_extract(
+    frame_paths, original_frames, timestamps = frame_extract(
         args.video, out_dir=tmp_dir.name)
     num_frame = len(frame_paths)
     h, w, _ = original_frames[0].shape
@@ -611,7 +658,7 @@ def main():
     stdet_preds = None
     if args.use_skeleton_stdet:
         print('Use skeleton-based SpatioTemporal Action Detection')
-        clip_len, frame_interval = 30, 1
+        clip_len, frame_interval = 50, 1
         timestamps, stdet_preds = skeleton_based_stdet(args, stdet_label_map,
                                                        human_detections,
                                                        pose_results, num_frame,

@@ -244,8 +244,6 @@ def inference_pose(pose_queue,pose_queue_stdet):
             predict_step=0
         predict_step+=1    
         predict_step_stdet+=1
-        
-        
 def get_items_from_queue(queue):
     """Queue에서 num_items 개수만큼 아이템을 꺼내어 리스트로 반환"""
     keypoint=[]
