@@ -275,8 +275,6 @@ for idx, xml_file in enumerate(xml_files):
             print(new_data_keypoint.shape)
             new_data_keypoint_score=np.array(new_data_keypoint_score_list)
             print(new_data_keypoint_score.shape)
-            if(len(new_data_keypoint.shape)==len(new_data_keypoint_score.shape) ):
-                continue
             data["keypoint"] = new_data_keypoint.transpose((1, 0, 2, 3))
             data["keypoint_score"] = new_data_keypoint_score.transpose((1, 0, 2))
             print("바뀐keypoint:",data["keypoint"].shape)

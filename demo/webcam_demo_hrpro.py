@@ -8,17 +8,26 @@ from threading import Thread
 import multiprocessing as mp
 import mmengine
 import mmcv
-
+from queue import Queue
+from HR_pro import optimization 
 import cv2
 import numpy as np
+from omegaconf import OmegaConf
 import torch
 from mmengine import Config, DictAction
 from mmengine.dataset import Compose, pseudo_collate
 from ultralytics import YOLO
-
+from datetime import datetime, timedelta
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
+from firebase_admin import auth
+from firebase_admin import messaging
+# 현재 시간
 from mmaction.apis import init_recognizer
 from mmaction.apis.inference import inference_recognizer
 from mmaction.utils import get_str_type
+from video_extract import ExtractI3D
 PLATEBLUE = '03045e-023e8a-0077b6-0096c7-00b4d8-48cae4'
 PLATEBLUE = PLATEBLUE.split('-')
 def hex2color(h):
@@ -37,6 +46,8 @@ EXCLUED_STEPS = [
 ]
 NUM_KEYPOINT=17
 NUM_FRAME=30
+PREDICT_STACK=100
+PREDICT_STEP=100
 def load_label_map(file_path):
     """Load Label Map.
 
@@ -129,59 +140,37 @@ def parse_args():
     return args
 
 
-def show_results(result_queue,result_queue_stdet):
+def show_results():
     print('Press "Esc", "q" or "Q" to exit')
     # 비디오 저장을 위한 설정
-    if args.output_file!=None:
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-        out = cv2.VideoWriter(args.output_file, fourcc, 30.0, (640, 480))
-        fps = camera.get(cv2.CAP_PROP_FPS)
-        duration_in_seconds=300
-        total_frames = fps * duration_in_seconds
+
     current_frame = 0
     text_info = {}
     bbox_info = None
     bbox_info2 = None
     cur_time = time.time()
+    first_frame = True
+    predict_stack=0
+    frame_list =[]
+    start_time =None
+    end_time =None
+    start_time = datetime.now()
     while True:
         msg = 'Waiting for action ...'
         
-        _, frame = camera.read()
+        frame_exists, frame = camera.read()
         results2=None
-        frame_queue.append(np.array(frame))
-        if len(pose_deque)!= 0:
-            results = pose_deque[0]
-            if(results.boxes.id!=None):
-                if result_queue_stdet.qsize() != 0:
-                    results2 = result_queue_stdet.get()
-                    bbox_info = results2[0]
-                    track_id2,skeleton_prediction,box  = results2[0]
-                track_ids = results.boxes.id.int().cpu().tolist()
-                boxes = results.boxes.xyxy.cpu().numpy().astype(np.int64)
-                bbox_info2 =zip(boxes,track_ids)
-                for box, track_id  in zip(boxes,track_ids):
-                    (startX, startY, endX, endY) = box
-                    # if score < threshold:
-                    #     break
-                    if results2!=None and (track_id2==track_id):
-                        cv2.putText(frame, "label", (startX+1, startY), FONTFACE, FONTSCALE,FONTCOLOR, THICKNESS, LINETYPE)
-                    cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
-                    cv2.putText(frame, str(track_id), (startX, startY), FONTFACE, FONTSCALE,
-                                FONTCOLOR, THICKNESS, LINETYPE)
-        elif bbox_info2!=None:
-            (boxes,track_ids) = bbox_info2
-            for box, track_id  in zip(boxes,track_ids):
-                (startX, startY, endX, endY) = box
-                # if score < threshold:
-                #     break
-                if(bbox_info!=None):
-                    track_id2,skeleton_prediction,box  = bbox_info
-                    if  (track_id2==track_id):
-                        cv2.putText(frame, "label", (startX+1, startY), FONTFACE, FONTSCALE,FONTCOLOR, THICKNESS, LINETYPE)
-                    
-                cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
-                cv2.putText(frame, str(track_id), (startX, startY), FONTFACE, FONTSCALE,
-                            FONTCOLOR, THICKNESS, LINETYPE)
+        if first_frame:
+            first_frame = False
+            if not frame_exists:
+                continue
+        if frame_exists:
+            if (len(frame_list)!=0 and  len(frame_list)% PREDICT_STACK==0 ):
+                end_time = datetime.now()
+                frame_queue.append(copy.deepcopy([start_time, end_time, frame_list]))
+                start_time = datetime.now()
+                frame_list.clear()
+            frame_list.append(frame)
 
         if result_queue.qsize() != 0:
             text_info = {}
@@ -204,19 +193,14 @@ def show_results(result_queue,result_queue_stdet):
         else:
             cv2.putText(frame, msg, (0, 40), FONTFACE, FONTSCALE, MSGCOLOR,
                         THICKNESS, LINETYPE)
-        if out!=None:
-            out.write(frame)
-            current_frame += 1
-            if(current_frame==total_frames):
-                current_frame=0
-        cv2.imshow('camera', frame)
-        ch = cv2.waitKey(1)
+        if frame_exists:
+            cv2.imshow('camera', frame)
+            ch = cv2.waitKey(1)
 
-        if ch == 27 or ch == ord('q') or ch == ord('Q'):
-            camera.release()
-            out.release()
-            cv2.destroyAllWindows()
-            break
+            if ch == 27 or ch == ord('q') or ch == ord('Q'):
+                camera.release()
+                cv2.destroyAllWindows()
+                break
 
         if drawing_fps > 0:
             # add a limiter for actual drawing fps <= drawing_fps
@@ -224,39 +208,115 @@ def show_results(result_queue,result_queue_stdet):
             if sleep_time > 0:
                 time.sleep(sleep_time)
             cur_time = time.time()
-def inference_pose(pose_queue,pose_queue_stdet):
-    predict_step=0
-    predict_step_stdet=0
+def inference_pose(hr_to_pose_queue,pose_queue_stdet):
     yolo =YOLO('checkpoints/yolov8x-pose-p6.pt')
     while True:
-        if len(frame_queue) != 0:
-            r = yolo.track(frame_queue[0],persist=True,verbose=False)
-            pose_deque.append(r[0])
-        if len(pose_deque)==30 and predict_step_stdet==8:
-            pose_queue_stdet.put(copy.deepcopy(pose_deque))
-            predict_step_stdet=0
-        elif predict_step_stdet==8:
-            predict_step_stdet=0
-        if len(pose_deque)==30 and predict_step==30:
-            pose_queue.put(copy.deepcopy(pose_deque))
-            predict_step=0
-        elif predict_step==30:
-            predict_step=0
-        predict_step+=1    
-        predict_step_stdet+=1
+        if hr_to_pose_queue.qsize()!=0 :
+            filtered_frames = hr_to_pose_queue.get()
+            for frames in filtered_frames:
+                start_time,end_time,frames = frames
+                pose_deque=deque()
+                for i in  frames:
+                    r = yolo.track(i,persist=True,verbose=False)
+                    pose_deque.append(r[0])
+                if(len(pose_deque)!=0):
+                    # pose_queue.put(copy.deepcopy([start_time,end_time, start_frame,end_frame,pose_deque]))
+                    pose_queue_stdet.put(copy.deepcopy([start_time,end_time, pose_deque ,frames]))
+                  
+# 겹치는 세그먼트들을 합치는 함수 구현
+def merge_overlapping_segments(data):
+    if not data:
+        return []
+
+    # 결과 리스트 초기화
+    merged_segments = []
+    # 첫 번째 세그먼트로 시작
+    current_start, current_end = data[0]['segment']
+
+    for item in data[1:]:
+        start, end = item['segment']
+        # 현재 세그먼트와 겹치는 경우, 세그먼트를 합침
+        if start <= current_end:
+            current_end = max(current_end, end)
+        else:
+            # 겹치지 않는 경우, 현재까지의 세그먼트를 결과에 추가하고, 새 세그먼트로 시작
+            merged_segments.append({'label': 'Merged', 'score': None, 'segment': [current_start, current_end]})
+            current_start, current_end = start, end
+    
+    # 마지막 세그먼트 추가
+    merged_segments.append({'label': 'Merged', 'score': None, 'segment': [current_start, current_end]})
+
+    return merged_segments
+def hr_pro(hr_pro_queue , hr_to_pose_queue,queue):
+    fps = queue.get()
+    print(fps)
+    while True:
+        if hr_pro_queue.qsize()!=0:
+            start_time,end_time,frames ,concatenated_features = hr_pro_queue.get()
+            final_proposal =  optimization.hr_pro(optimization.parse_args(),concatenated_features)
+            merged_data = merge_overlapping_segments(final_proposal)
+            sorted_data = sorted(merged_data, key=lambda x: x['segment'][0])
+            print(sorted_data)
+            sorted_data_with_frames = [{
+            'label': item['label'],
+            'score': item['score'],
+            'frames': (int(round(item['segment'][0] * fps)), int(round(item['segment'][1] * fps)))
+            } for item in sorted_data]
+            filtered_frames=[]
+            for item in sorted_data_with_frames:
+                (start_frame,end_frame)=item["frames"]
+                total_length = end_time - start_time
+                total_frames = fps * total_length.total_seconds()
+                start_frame_time = start_time + timedelta(seconds=(start_frame / fps))
+                end_frame_time = start_time + timedelta(seconds=(end_frame / fps))
+                filtered_frames.append([start_frame_time,end_frame_time,frames[start_frame:end_frame + 1]])
+            hr_to_pose_queue.put(filtered_frames)
+def bn_wvad(bn_wvad_queue,bn_to_result_queue):
+    pass
+def i3d(hr_pro_queue):
+    args2 = OmegaConf.create({
+    'feature_type': 'i3d',
+    'device': 'cuda:0',  # 또는 'cpu'를 사용하시면 됩니다.
+    'on_extraction': 'ignore',  # 이 설정은 무시될 것입니다.
+    'output_path': 'ignore',  # 이 설정도 무시됩니다.
+    'stack_size': 16,  # 이 값들은 예시이며 실제 값으로 대체해야 합니다.
+    'step_size': 16,
+    'streams': None,
+    'flow_type': 'raft',
+    'extraction_fps': 25,
+    'tmp_path': './tmp/i3d',
+    'keep_tmp_files': False,
+    'show_pred': False,
+    'config': None
+    # 여기에 args_cli에 필요한 나머지 설정을 추가하십시오.
+})  
+    predict_step=0
+    extractor = ExtractI3D(args2)
+    while True:
+        if  len(frame_queue)!=0:
+            start_time,end_time,frame_list = frame_queue.popleft()
+            features = extractor.extract(frame_list)
+            rgb_features = features['rgb']
+            flow_features = features['flow']
+            concatenated_features = np.concatenate((rgb_features, flow_features), axis=1)
+            hr_pro_queue.put(copy.deepcopy([start_time,end_time,frame_list,concatenated_features]))
+            # bn_wvad_queue.put((list(frame_queue), copy.deepcopy(rgb_features)))
+            
+            
 def get_items_from_queue(queue):
     """Queue에서 num_items 개수만큼 아이템을 꺼내어 리스트로 반환"""
     keypoint=[]
     keypoint_score=[]
-    r = queue.get()
+    start_frame, end_frame , r = queue.get()
+    num_frame=len(r)
     for item in r:
         keypoint.append( item.keypoints.xy.cpu().numpy())
         keypoint_score.append( item.keypoints.conf.cpu().numpy())
-    return keypoint ,keypoint_score
+    return keypoint ,keypoint_score,num_frame
 def get_items_from_queue_stdet(queue):
     """Queue에서 num_items 개수만큼 아이템을 꺼내어 리스트로 반환"""
     track_history=defaultdict(lambda:[])
-    item = queue.get()
+    start_time,end_time,item ,frames= queue.get()
     
     for r in item:
         if r.boxes.id!=None:
@@ -267,7 +327,7 @@ def get_items_from_queue_stdet(queue):
                 if len(track) > NUM_FRAME:  # retain 90 tracks for 90 frames
                     track.pop(0)
 
-    return track_history
+    return start_time,end_time,  track_history ,item ,frames
 def inference(pose_queue,queue,result_queue):
     data = queue.get()  # 첫 번째 아이템 (dict)
     args = queue.get()  # 두 번째 아이템 (argparse.Namespace)
@@ -284,12 +344,12 @@ def inference(pose_queue,queue,result_queue):
         keypoint_score= []
         while len(keypoint_score) == 0:
             if pose_queue.qsize() > 0:
-                keypoint, keypoint_score= get_items_from_queue(pose_queue)
+                keypoint, keypoint_score, num_frame= get_items_from_queue(pose_queue)
         # frame_queue.append((np.array(r[0].keypoints.xy.cpu().numpy()),np.array(r[0].keypoints.conf.cpu().numpy())))
                 num_person = max([len(x) for x in keypoint])
-                combined_keypoint = np.zeros((NUM_FRAME, num_person, NUM_KEYPOINT, 2),
+                combined_keypoint = np.zeros((num_frame, num_person, NUM_KEYPOINT, 2),
                         dtype=np.float16)
-                combined_keypoint_score = np.zeros((NUM_FRAME, num_person, NUM_KEYPOINT),
+                combined_keypoint_score = np.zeros((num_frame, num_person, NUM_KEYPOINT),
                               dtype=np.float16)
                 for f_idx, frm_pose in enumerate(zip(keypoint,keypoint_score)):
                     keypoint_m,keypoint_score_m = frm_pose 
@@ -297,7 +357,6 @@ def inference(pose_queue,queue,result_queue):
                     for p_idx in range(frm_num_persons):
                         combined_keypoint[f_idx, p_idx] = keypoint_m[p_idx]
                         combined_keypoint_score[f_idx, p_idx] = keypoint_score_m[p_idx]
-
 
         cur_data = data.copy()
         cur_data['total_frames'] = combined_keypoint_score.shape[0]
@@ -313,6 +372,104 @@ def inference(pose_queue,queue,result_queue):
         my_list.append(my_tuple)
         print(my_list)
         result_queue.put(copy.deepcopy(my_list))
+def visualize(result_queue_stdet,queue):
+    cred = credentials.Certificate('/home/bigdeal/mnt2/workspace/mmaction2/demo/cctv-cc0b7-firebase-adminsdk-chce8-439053bc3e.json')
+    firebase_admin.initialize_app(cred)
+    # Firestore 인스턴스를 가져옵니다.
+    db = firestore.client()
+    # 사용자의 이메일 주소
+    user_email = 'dudnjsckrgo@gmail.com'
+
+    try:
+        # 사용자의 이메일로 UID 조회
+        user = auth.get_user_by_email(user_email)
+        print(f"User ID: {user.uid}")
+    except auth.UserNotFoundError:
+        print(f"No user found for email: {user_email}")
+    fps = queue.get()  
+    h = queue.get() 
+    w = queue.get()  
+    # user = queue.get()  
+    while True:
+        if result_queue_stdet.qsize()>0:
+            start_time,end_time,pose_deque,results2,frames = result_queue_stdet.get()
+            file_name= f"{start_time}-{end_time}.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            out = cv2.VideoWriter(file_name, fourcc, fps, (w, h))
+            for frame, pose in zip(frames,pose_deque)  :
+                results = pose
+                if(results.boxes.id!=None):
+                    bbox_info = results2[0]
+                    track_id2,skeleton_prediction,box  = results2[0]
+                    track_ids = results.boxes.id.int().cpu().tolist()
+                    boxes = results.boxes.xyxy.cpu().numpy().astype(np.int64)
+                    for box, track_id  in zip(boxes,track_ids):
+                        (startX, startY, endX, endY) = box
+                        # if score < threshold:
+                        #     break
+                        if results2!=None and (track_id2==track_id):
+                            cv2.putText(frame, "label", (startX+1, startY), FONTFACE, FONTSCALE,FONTCOLOR, THICKNESS, LINETYPE)
+                        cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+                        cv2.putText(frame, str(track_id), (startX, startY), FONTFACE, FONTSCALE,
+                                    FONTCOLOR, THICKNESS, LINETYPE)
+                # elif bbox_info2!=None:
+                #     (boxes,track_ids) = bbox_info2
+                #     for box, track_id  in zip(boxes,track_ids):
+                #         (startX, startY, endX, endY) = box
+                #         # if score < threshold:
+                #         #     break
+                #         if(bbox_info!=None):
+                #             track_id2,skeleton_prediction,box  = bbox_info
+                #             if  (track_id2==track_id):
+                #                 cv2.putText(frame, "label", (startX+1, startY), FONTFACE, FONTSCALE,FONTCOLOR, THICKNESS, LINETYPE)
+                            
+                #         cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+                #         cv2.putText(frame, str(track_id), (startX, startY), FONTFACE, FONTSCALE,
+                #                     FONTCOLOR, THICKNESS, LINETYPE)
+                out.write(frame)
+            out.release()
+            # 비디오 로그 저장
+            video_ref = db.collection('video_logs').document()
+            video_data = {
+                'video_name': file_name,
+                'timestamp': firestore.SERVER_TIMESTAMP, # 서버 시간을 사용
+                'cctv_id': 'cctv_12345',
+                'user_id': user.uid
+            }
+            video_ref.set(video_data)
+            print(f"Saved video log with ID: {video_ref.id}")
+
+            # 비디오에 관련된 행동 로그 저장
+            action_ref = db.collection('action_logs').document()
+            action_data = {
+                'action_type': 'door_open',
+                'timestamp': firestore.SERVER_TIMESTAMP, # 서버 시간을 사용
+                'cctv_id': 'cctv_12345',
+                'video_id': video_ref.id, # 위에서 저장한 비디오 로그의 ID를 참조
+                'isTheft': False,
+                'user_id': 'user_12345',
+                'track_id': track_id
+            }
+            action_ref.set(action_data)
+            print(f"Saved action log with ID: {action_ref.id}")    
+            # 이 토큰은 클라이언트 애플리케이션에서 등록 절차를 거쳐 생성된 것입니다.
+            # registration_token = 'your-registration-token'
+
+            # # 메시지 정의
+            # message = messaging.Message(
+            #     data={
+            #         'score': '850',
+            #         'time': '2:45'
+            #     },
+            #     token=registration_token,
+            # )
+
+            # # 메시지 보내기
+            # response = messaging.send(message)
+            # print('Successfully sent message:', response)
+
+
+    pass
 def inference_stdet(pose_queue_stdet,queue,result_queue_stdet):
     data = queue.get()  # 첫 번째 아이템 (dict)
     args = queue.get()  # 두 번째 아이템 (argparse.Namespace)
@@ -330,9 +487,10 @@ def inference_stdet(pose_queue_stdet,queue,result_queue_stdet):
         keypoint_score= []
         while len(keypoint_score) == 0:
             if pose_queue_stdet.qsize() > 0:
-                track_history= get_items_from_queue_stdet(pose_queue_stdet)
+                start_time,end_time,track_history ,pose_deque ,frames= get_items_from_queue_stdet(pose_queue_stdet)
         # frame_queue.append((np.array(r[0].keypoints.xy.cpu().numpy()),np.array(r[0].keypoints.conf.cpu().numpy())))
-                
+
+                print(start_time,end_time)
                 combined_keypoint = np.zeros((NUM_FRAME, 1, NUM_KEYPOINT, 2),
                         dtype=np.float16)
                 combined_keypoint_score = np.zeros((NUM_FRAME, 1, NUM_KEYPOINT),
@@ -365,13 +523,16 @@ def inference_stdet(pose_queue_stdet,queue,result_queue_stdet):
                     print(f"track_id:{track_id},action_label: {skeleton_prediction},box:{box.cpu().numpy()}")
                     my_tuple= (track_id,skeleton_prediction,box.cpu().numpy() )
                     my_list.append(my_tuple)
-                result_queue_stdet.put(copy.deepcopy(my_list))
+                result_queue_stdet.put(copy.deepcopy([start_time,end_time,pose_deque,my_list,frames]))
 
 
 def main():
+    user = 'dudnjsckrgo@gmail.com'
+
+        
     global average_size, threshold, drawing_fps, inference_fps, \
         device, model, camera, data, label, sample_length, \
-        args, frame_queue, result_queue ,img_shape ,pose_queue,out,pose_deque
+        args, frame_queue, result_queue ,img_shape ,pose_queue,out,pose_deque,fps
     img_shape=None
     args = parse_args()
     average_size = args.average_size
@@ -394,6 +555,7 @@ def main():
     new_w, new_h = mmcv.rescale_size((w, h), (256, np.Inf))
     w_ratio, h_ratio = new_w / w, new_h / h
     sample_length=30
+    fps = camera.get(cv2.CAP_PROP_FPS)  
     data = dict(frame_dict='',
                             label=-1,
                             img_shape=(h,w),
@@ -425,7 +587,11 @@ def main():
 
     try:
         mp.set_start_method('spawn', force=True)
-        frame_queue = deque(maxlen=1)
+        frame_queue = deque()
+        hr_pro_queue = mp.Queue(maxsize=1)
+        hr_to_pose_queue = mp.Queue(maxsize=1)
+        bn_to_result_queue = Queue(maxsize=1)
+        bn_wvad_queue = Queue(maxsize=1)
         pose_deque=deque(maxlen=30)
         
         # pose_queue = deque(maxlen=sample_length)
@@ -433,27 +599,46 @@ def main():
         result_queue_stdet =  mp.Queue()
         pose_queue = mp.Queue()
         pose_queue_stdet = mp.Queue()
-        queue = mp.Queue()
-        queue.put(data)  # dict 전달
-        queue.put(vars(args))
-        queue.put(cfg)
-        queue2 = mp.Queue()
-        queue2.put(data)  # dict 전달
-        queue2.put(vars(args))
-        queue2.put(cfg)
-        pw = Thread(target=show_results, args=(result_queue,result_queue_stdet), daemon=True)
-        ps = Thread(target=inference_pose, args=(pose_queue,pose_queue_stdet,), daemon=True)
+        data_info_queue3 = mp.Queue()
+        data_info_queue4 = mp.Queue()
+        data_info_queue3.put(fps)  # dict 전달
+        data_info_queue4.put(fps)  # dict 전달
+        data_info_queue4.put(h)  # dict 전달
+        data_info_queue4.put(w)  # dict 전달
+        data_info_queue4.put(user)  # dict 전달
+        
+        data_info_queue2 = mp.Queue()
+        data_info_queue2.put(data)  # dict 전달
+        data_info_queue2.put(vars(args))
+        data_info_queue2.put(cfg)
+        data_info_queue = mp.Queue()
+        data_info_queue.put(data)  # dict 전달
+        data_info_queue.put(vars(args))
+        data_info_queue.put(cfg)
+        pw = Thread(target=show_results, args=(), daemon=True)
+        ps_i3d = Thread(target=i3d, args=(hr_pro_queue,), daemon=True)
+        ps = mp.Process(target=hr_pro, args=(hr_pro_queue,hr_to_pose_queue,data_info_queue3), daemon=True)
+        # ps = mp.Process(target=bn_wvad, args=(pose_queue,pose_queue_stdet,), daemon=True)
+        ps_pose = mp.Process(target=inference_pose, args=(hr_to_pose_queue,pose_queue_stdet,), daemon=True)
         # pr = Thread(target=inference, args=(), daemon=True)
-        pr = mp.Process(target=inference, args=(pose_queue,queue,result_queue,))
-        pr2 = mp.Process(target=inference_stdet, args=(pose_queue_stdet,queue2,result_queue_stdet,))
+        # pr = mp.Process(target=inference, args=(pose_queue,data_info_queue2,result_queue,))
+        pr2 = mp.Process(target=inference_stdet, args=(pose_queue_stdet,data_info_queue,result_queue_stdet,))
+        pr3 = mp.Process(target=visualize, args=(result_queue_stdet,data_info_queue4))
         pw.start()
+        ps_i3d.start()
+        ps_pose.start()
         ps.start()
-        pr.start()
+        # pr.start()
         pr2.start()
+        pr3.start()
         pw.join()
-        pr.join()
+        ps_i3d.join()
+        ps_pose.join()
+        # pr.join()
         pr2.join()
+        pr3.join()
         ps.join()
+
     except KeyboardInterrupt:
         if out!=None:
             out.release()

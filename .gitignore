@@ -158,3 +158,5 @@ softlink_retail
 *.pt
 *.engine
 *.onnx
+*.png
+*.gif
