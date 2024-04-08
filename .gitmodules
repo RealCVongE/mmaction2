@@ -4,3 +4,6 @@
 [submodule "video_feature"]
 	path = video_feature
 	url = https://github.com/RealCVongE/video_features.git
+[submodule "bn_wvad"]
+	path = bn_wvad
+	url = https://github.com/RealCVongE/BN-WVAD.git
